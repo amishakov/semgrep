@@ -1,27 +1,48 @@
-(* Provides the 'Arg', 'Cmd', 'Manpage', and 'Term' modules. *)
-open Cmdliner
+module Arg = Cmdliner.Arg
+module Term = Cmdliner.Term
+module Cmd = Cmdliner.Cmd
 
 (*****************************************************************************)
 (* Prelude *)
 (*****************************************************************************)
 (*
-   'semgrep login/logout' command-line arguments processing.
+   'semgrep login' command-line arguments processing.
 *)
 
 (*****************************************************************************)
 (* Types *)
 (*****************************************************************************)
-type conf = { logging_level : Logs.level option } [@@deriving show]
+type conf = {
+  common : CLI_common.conf;
+  (* Initialize the auth exchange with a temporary shared secret *)
+  one_time_seed : string;
+}
+[@@deriving show]
 
 (*****************************************************************************)
-(* Login subcommand *)
+(* Command-line Flags *)
 (*****************************************************************************)
 
-let login_doc = "Obtain and save credentials for semgrep.dev"
+let o_temporary_secret : string Term.t =
+  let doc =
+    "Initialize login with a temporary secret from the Semgrep App onboarding \
+     flow"
+  in
+  Arg.(value & opt string "" & info [ "init"; "setup" ] ~docv:"secret" ~doc)
 
-let login_man : Manpage.block list =
+(*****************************************************************************)
+(* Turn argv into a conf *)
+(*****************************************************************************)
+
+let cmdline_term : conf Term.t =
+  let combine common one_time_seed = { common; one_time_seed } in
+  Term.(const combine $ CLI_common.o_common $ o_temporary_secret)
+
+let doc = "Obtain and save credentials for semgrep.dev"
+
+let man : Cmdliner.Manpage.block list =
   [
-    `S Manpage.s_description;
+    `S Cmdliner.Manpage.s_description;
     `P
       "Obtain and save credentials for semgrep.dev\n\n\
       \    Looks for an semgrep.dev API token in the environment variable \
@@ -31,33 +52,12 @@ let login_man : Manpage.block list =
   ]
   @ CLI_common.help_page_bottom
 
-let login_cmdline_info : Cmd.info =
-  Cmd.info "semgrep login" ~doc:login_doc ~man:login_man
+let cmdline_info : Cmd.info = Cmd.info "semgrep login" ~doc ~man
 
 (*****************************************************************************)
-(* Logout subcommand *)
+(* Entry point *)
 (*****************************************************************************)
 
-let logout_doc = "Remove locally stored credentials to semgrep.dev"
-
-let logout_man : Manpage.block list =
-  [
-    `S Manpage.s_description;
-    `P "Remove locally stored credentials to semgrep.dev";
-  ]
-  @ CLI_common.help_page_bottom
-
-let logout_cmdline_info : Cmd.info =
-  Cmd.info "semgrep logout" ~doc:logout_doc ~man:logout_man
-
-(*****************************************************************************)
-(* Turn argv into a conf *)
-(*****************************************************************************)
-
-let term =
-  let combine logging_level = { logging_level } in
-  Term.(const combine $ CLI_common.o_logging)
-
-let parse_argv (cmd_info : Cmd.info) (argv : string array) : conf =
-  let cmd : conf Cmd.t = Cmd.v cmd_info term in
+let parse_argv (argv : string array) : conf =
+  let cmd : conf Cmd.t = Cmd.v cmdline_info cmdline_term in
   CLI_common.eval_value ~argv cmd

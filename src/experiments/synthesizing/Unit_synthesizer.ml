@@ -1,8 +1,10 @@
 (*s: semgrep/matching/Unit_matcher.ml *)
 open Common
-open File.Operators
+open Fpath_.Operators
 module G = AST_generic
 module PPG = Pretty_print_AST
+
+let t = Testo.create
 
 (*****************************************************************************)
 (* Semgrep Unit tests *)
@@ -177,15 +179,14 @@ let java_tests =
 
 let tests =
   [
-    ( "pattern inference features",
-      fun () ->
+    t "pattern inference features" (fun () ->
         let cases = [ (Lang.Python, python_tests); (Lang.Java, java_tests) ] in
         cases
         |> List.iter (fun (lang, tests) ->
                tests
                |> List.iter (fun (filename, range, sols) ->
                       let file = test_path / filename in
-                      let config = Rule_options.default_config in
+                      let config = Rule_options.default in
 
                       (* pattern candidates (as strings) *)
                       let pats =
@@ -194,17 +195,22 @@ let tests =
                       (* the code *)
                       let ast =
                         Parse_target.parse_and_resolve_name_fail_if_partial lang
-                          !!file
+                          file
                       in
                       (* BUG? resolve again? already done above *)
                       Naming_AST.resolve lang ast;
 
-                      let r = Range.range_of_linecol_spec range !!file in
+                      let r = Range.range_of_linecol_spec range file in
 
                       let check_pats (str, pat) =
                         try
                           (* the pattern AST *)
-                          let pattern = Parse_pattern.parse_pattern lang pat in
+                          let pattern =
+                            match Parse_pattern.parse_pattern lang pat with
+                            | Ok pat -> pat
+                            | Error s ->
+                                failwith (spf "problem parsing %s: %s" pat s)
+                          in
 
                           (* extracting the code at the range *)
                           let e_opt = Range_to_AST.any_at_range_first r ast in
@@ -218,8 +224,8 @@ let tests =
                               in
                               let matches_with_env =
                                 let env =
-                                  Matching_generic.empty_environment None lang
-                                    Rule_options.default_config
+                                  Matching_generic.environment_of_any lang
+                                    Rule_options.default code
                                 in
                                 Match_patterns.match_any_any pattern code env
                               in
@@ -227,9 +233,9 @@ let tests =
                                * but really should match the code in the given file at
                                * the given range *)
                               if matches_with_env =*= [] then (
-                                pr2 str;
-                                pr2 (AST_generic.show_any pattern);
-                                pr2 (AST_generic.show_any code));
+                                UCommon.pr2 str;
+                                UCommon.pr2 (AST_generic.show_any pattern);
+                                UCommon.pr2 (AST_generic.show_any code));
                               Alcotest.(check bool)
                                 (spf "pattern:|%s| should match |%s" pat
                                    (Pretty_print_pattern.pattern_to_string lang
@@ -251,5 +257,5 @@ let tests =
                       Alcotest.(check bool)
                         ("Patterns do not match solution, where inferred \
                           patterns are:\n" ^ pats_str)
-                        true (pats =*= sols))) );
+                        true (pats =*= sols))));
   ]

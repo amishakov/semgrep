@@ -6,7 +6,7 @@
    optimization that operates directly on the source files rather than the
    AST. It would be better since it turns out parsing is usually more
    expensive than matching, and that would allow skipping the parsing step.
-   See https://github.com/returntocorp/semgrep/issues/3461
+   See https://github.com/semgrep/semgrep/issues/3461
 *)
 
 (*
@@ -41,8 +41,10 @@ type atom_table = {
 
 let build_atom_table ~case_sensitive (pat : Pattern_AST.t) =
   let open Pattern_AST in
-  let words = Hashtbl.create 1000 in
-  let chars = Hashtbl.create 256 in
+  (* Initial sizes for these hash tables reduced based on a memtrace
+   * investigation. Increase them only with caution. *)
+  let words = Hashtbl.create 64 in
+  let chars = Hashtbl.create 32 in
   let rec index nodes = List.iter index_node nodes
   and index_node = function
     | Atom (_, atom) -> index_atom atom

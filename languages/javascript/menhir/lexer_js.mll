@@ -2,7 +2,7 @@
 (* Yoann Padioleau
  *
  * Copyright (C) 2010, 2013, 2014 Facebook
- * Copyright (C) 2019 r2c
+ * Copyright (C) 2019 Semgrep Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
@@ -18,6 +18,7 @@ open Common
 
 open Parser_js
 module Flag = Flag_parsing
+module Log = Log_parser_javascript.Log
 
 (*****************************************************************************)
 (* Prelude *)
@@ -53,7 +54,7 @@ let hexa_to_int = function
 (* ---------------------------------------------------------------------- *)
 (* Keywords *)
 (* ---------------------------------------------------------------------- *)
-let keyword_table = Common.hash_of_list [
+let keyword_table = Hashtbl_.hash_of_list [
 
   "if",         (fun ii -> T_IF ii);
   "else",       (fun ii -> T_ELSE ii);
@@ -192,12 +193,12 @@ let rec current_mode () =
   match !_mode_stack with
   | top :: _ -> top
   | [] ->
-      pr2("mode_stack is empty, defaulting to INITIAL");
+      Log.warn (fun m -> m "mode_stack is empty, defaulting to INITIAL");
       reset();
       current_mode ()
 
-let push_mode mode = Common.push mode _mode_stack
-let pop_mode () = ignore(Common2.pop2 _mode_stack)
+let push_mode mode = Stack_.push mode _mode_stack
+let pop_mode () = ignore(Stack_.pop _mode_stack)
 let set_mode mode = begin pop_mode(); push_mode mode; end
 
 (* Here is an example of state transition. Given a js file like:

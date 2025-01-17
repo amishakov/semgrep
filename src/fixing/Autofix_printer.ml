@@ -1,6 +1,6 @@
 (* Nat Mote
  *
- * Copyright (C) 2019-2022 r2c
+ * Copyright (C) 2019-2022 Semgrep Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
@@ -12,14 +12,13 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the file
  * LICENSE for more details.
  *)
-
 open Common
 open AST_generic
 module MV = Metavariable
 
-let ( let/ ) = Result.bind
-
-(******************************************************************************)
+(*****************************************************************************)
+(* Prelude *)
+(*****************************************************************************)
 (* Handles AST printing for the purposes of autofix.
  *
  * The main printing logic happens elsewhere. This module's main purpose is to
@@ -31,7 +30,10 @@ let ( let/ ) = Result.bind
  * - It lets us make minimal changes to target files by carrying over
  *   formatting, comments, etc. from the original code.
  *)
-(******************************************************************************)
+
+(*****************************************************************************)
+(* Helpers *)
+(*****************************************************************************)
 
 (* This lets us avoid the polymorphic hash function and polymorphic equality,
  * which will take into account extraneous information such as e_range, leading
@@ -39,7 +41,7 @@ let ( let/ ) = Result.bind
 module ASTTable = Hashtbl.Make (struct
   type t = AST_generic.any
 
-  let equal = AST_utils.with_structural_equal AST_generic.equal_any
+  let equal = AST_generic.equal_any
   let hash = AST_generic.hash_any
 end)
 
@@ -63,6 +65,10 @@ module JsTsPrinter = Hybrid_print.Make (struct
   class printer = Ugly_print_AST.jsts_printer
 end)
 
+module OCamlPrinter = Hybrid_print.Make (struct
+  class printer = Ugly_print_AST.ocaml_printer
+end)
+
 let get_printer lang external_printer :
     (Ugly_print_AST.printer_t, string) result =
   match lang with
@@ -73,11 +79,12 @@ let get_printer lang external_printer :
   | Lang.Js
   | Lang.Ts ->
       Ok (new JsTsPrinter.printer external_printer)
+  | Lang.Ocaml -> Ok (new OCamlPrinter.printer external_printer)
   | __else__ -> Error (spf "No printer available for %s" (Lang.to_string lang))
 
 let original_source_of_ast source any =
   let* start, end_ = AST_generic_helpers.range_of_any_opt any in
-  let starti = start.Tok.pos.charpos in
+  let starti = start.Tok.pos.bytepos in
   let _, _, endi = Tok.end_pos_of_loc end_ in
   let len = endi - starti in
   let str = String.sub source starti len in
@@ -131,7 +138,8 @@ let add_metavars (tbl : ast_node_table) metavars =
       | Ss _
       | Params _
       | Xmls _
-      | Text _ ->
+      | Text _
+      | Any _ ->
           ())
     metavars
 
@@ -184,9 +192,9 @@ let make_external_printer ~metavars ~target_contents ~fix_pattern_ast
     in
     Ok (Immutable_buffer.of_string str)
 
-(******************************************************************************)
+(*****************************************************************************)
 (* Entry Point *)
-(******************************************************************************)
+(*****************************************************************************)
 
 let print_ast ~lang ~metavars ~target_contents ~fix_pattern_ast ~fix_pattern
     fixed_ast =

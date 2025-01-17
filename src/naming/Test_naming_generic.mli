@@ -1,3 +1,2 @@
 val actions :
-  parse_program:(Common.filename -> AST_generic.program) ->
-  Arg_helpers.cmdline_actions
+  parse_program:(Fpath.t -> AST_generic.program) -> Arg_.cmdline_actions

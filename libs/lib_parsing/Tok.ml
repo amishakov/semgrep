@@ -14,14 +14,15 @@
  * license.txt for more details.
  *)
 open Common
+open Sexplib.Std
 
 (*****************************************************************************)
 (* Prelude *)
 (*****************************************************************************)
 (* Information about tokens (mostly their location).
  *
- * Note that the types below are a bit complicated because we want
- * to represent "fake" and "expanded" tokens. The types used to be even
+ * Note that Tok.t below is a bit complicated because we want
+ * to represent "fake" and "expanded" tokens. The type used to be even
  * more complicated to allow to annotate tokens with transformation information
  * for Spatch in Coccinelle. However, this is not the case anymore because
  * we use a different approach to transform code
@@ -63,7 +64,7 @@ type location = {
    *)
   pos : Pos.t;
 }
-[@@deriving show { with_path = false }, eq]
+[@@deriving show { with_path = false }, eq, ord, sexp]
 
 (* to represent fake (e.g., fake semicolons in languages such as Javascript),
  * and expanded tokens (e.g., preprocessed constructs by cpp for C/C++)
@@ -72,34 +73,21 @@ type t =
   (* Present both in the AST and list of tokens in the pfff-based parsers *)
   | OriginTok of location
   (* Present only in the AST and generated after parsing. Can be used
-   * when building some extra AST elements. *)
-  | FakeTokStr of
-      string (* to help the generic pretty printer *)
-      * (* Sometimes we generate fake tokens close to existing
-         * origin tokens. This can be useful when have to give an error
-         * message that involves a fakeToken. The int is a kind of
-         * virtual position, an offset. See compare_pos below.
-         * Those are called "safe" fake tokens (in contrast to the
-         * regular/unsafe one which have no position information at all).
-         *)
-      (location * int) option
+   * when building some extra AST elements.
+   * The string (e.g., ";")  is to help the generic pretty printer.
+   * TODO: we should remove the option below and enforce the construction
+   * of safe fake tokens.
+   *)
+  | FakeTok of string * virtual_location option
   (* In the case of a XHP file, we could preprocess it and incorporate
    * the tokens of the preprocessed code with the tokens from
    * the original file. We want to mark those "expanded" tokens
    * with a special tag so that if someone do some transformation on
    * those expanded tokens they will get a warning (because we may have
    * trouble back-propagating the transformation back to the original file).
+   * The location refers to the preprocessed file (e.g. /tmp/pp-xxxx.pphp).
    *)
-  | ExpandedTok of
-      (* refers to the preprocessed file, e.g. /tmp/pp-xxxx.pphp *)
-      location
-      * (* kind of virtual position. This info refers to the last token
-         * before a serie of expanded tokens and the int is an offset.
-         * The goal is to be able to compare the position of tokens
-         * between then, even for expanded tokens. See compare_pos
-         * below.
-         *)
-      (location * int)
+  | ExpandedTok of location * virtual_location
   (* The Ab constructor is (ab)used to call '=' to compare
    * big AST portions. Indeed as we keep the token information in the AST,
    * if we have an expression in the code like "1+1" and want to test if
@@ -112,11 +100,29 @@ type t =
    *
    * Ab means AbstractLineTok. I Use a short name to not
    * polluate in debug mode.
+   *
+   * update: this constructor is not that useful anymore; You should prefer to
+   * use t_always_equal instead to compare big AST elements and not care
+   * about position.
    *)
   | Ab
-[@@deriving show { with_path = false }, eq]
 
-type t_always_equal = t [@@deriving show]
+(* Sometimes we generate fake tokens close to existing
+ * origin tokens. This can be useful when we need to give an error
+ * message that involves a fakeToken. The int below is a kind of
+ * virtual position, an offset.
+ * Those are called "safe" fake tokens (in contrast to the
+ * regular/unsafe one which have no position information at all).
+ *
+ * For ExpandedTok the location refers to the last token
+ * before a series of expanded tokens and the int is an offset.
+ * The goal is to be able to compare the position of tokens,
+ * even for expanded tokens. See compare_pos().
+ *)
+and virtual_location = location * int
+[@@deriving show { with_path = false }, eq, ord, sexp]
+
+type t_always_equal = t [@@deriving show, ord, sexp]
 
 (* sgrep: we do not care about position when comparing for equality 2 ASTs.
  * related: Lib_AST.abstract_position_info_any and then use OCaml generic '='.
@@ -137,13 +143,20 @@ let pp_full_token_info = ref false
 (* for ppx_deriving *)
 let pp fmt t = if !pp_full_token_info then pp fmt t else Format.fprintf fmt "()"
 
+(* not sure why we also need to define this one, but without this
+ * semgrep-core -diff_pfff_tree_sitter, which uses AST_generic.show_program,
+ * always display the full token info of the token
+ *)
+let pp_t_always_equal fmt t =
+  if !pp_full_token_info then pp fmt t else Format.fprintf fmt "()"
+
 (*****************************************************************************)
 (* Fake tokens (safe and unsafe) *)
 (*****************************************************************************)
 
 let is_fake tok =
   match tok with
-  | FakeTokStr _ -> true
+  | FakeTok _ -> true
   | _ -> false
 
 let is_origintok ii =
@@ -151,23 +164,21 @@ let is_origintok ii =
   | OriginTok _ -> true
   | _ -> false
 
-let fake_location = { str = ""; pos = Pos.fake_pos }
-
 (* Synthesize a fake token *)
-let unsafe_fake_tok str : t = FakeTokStr (str, None)
+let unsafe_fake_tok str : t = FakeTok (str, None)
 
 (* Synthesize a "safe" fake token *)
 let fake_tok_loc next_to_loc str : t =
   (* TODO: offset seems to have no use right now (?) *)
-  FakeTokStr (str, Some (next_to_loc, -1))
+  FakeTok (str, Some (next_to_loc, -1))
 
 let loc_of_tok (ii : t) : (location, string) Result.t =
   match ii with
   | OriginTok pinfo -> Ok pinfo
   (* TODO ? dangerous ? *)
   | ExpandedTok (pinfo_pp, _) -> Ok pinfo_pp
-  | FakeTokStr (_, Some (pi, _)) -> Ok pi
-  | FakeTokStr (_, None) -> Error "FakeTokStr"
+  | FakeTok (_, Some (pi, _)) -> Ok pi
+  | FakeTok (_, None) -> Error "FakeTok"
   | Ab -> Error "Ab"
 
 let fake_tok next_to_tok str : t =
@@ -210,34 +221,49 @@ let line_of_tok ii = (unsafe_loc_of_tok ii).pos.line
 let col_of_tok ii = (unsafe_loc_of_tok ii).pos.column
 
 (* todo: return a Real | Virt position ? *)
-let bytepos_of_tok ii = (unsafe_loc_of_tok ii).pos.charpos
+let bytepos_of_tok ii = (unsafe_loc_of_tok ii).pos.bytepos
 let file_of_tok ii = (unsafe_loc_of_tok ii).pos.file
 
 let content_of_tok ii =
   match ii with
   | OriginTok x -> x.str
-  | FakeTokStr (s, _) -> s
+  | FakeTok (s, _) -> s
   | ExpandedTok _
   | Ab ->
       raise (NoTokenLocation "content_of_tok: Expanded or Ab")
 
+let content_of_tok_opt ii =
+  match ii with
+  | OriginTok x -> Some x.str
+  | FakeTok (s, _) -> Some s
+  | ExpandedTok _
+  | Ab ->
+      None
+
 (* Token locations are supposed to denote the beginning of a token.
-   Suppose we are interested in instead having line, column, and charpos of
+   Suppose we are interested in instead having line, column, and bytepos of
    the end of a token instead.
    This is something we can do at relatively low cost by going through and
    inspecting the contents of the token, plus the start information.
 *)
 let end_pos_of_loc loc =
-  let line, col =
-    Stdcompat.String.fold_left
-      (fun (line, col) c ->
+  let line, col, trailing_nl =
+    String.fold_left
+      (fun (line, col, after_nl) c ->
         match c with
-        | '\n' -> (line + 1, 0)
-        | _ -> (line, col + 1))
-      (loc.pos.line, loc.pos.column)
+        | '\n' when after_nl -> (line + 1, 0, true)
+        | '\n' -> (line, col, true)
+        | _ when after_nl -> (line + 1, 1, false)
+        | _ -> (line, col + 1, false))
+      (loc.pos.line, loc.pos.column, false)
       loc.str
   in
-  (line, col, loc.pos.charpos + String.length loc.str)
+  let col =
+    (* THINK: We count a trailing newline as an extra character in the last line,
+     * is that the standard ? *)
+    if trailing_nl then col + 1 else col
+  in
+  (line, col, loc.pos.bytepos + String.length loc.str)
 
 (*****************************************************************************)
 (* Builders *)
@@ -245,24 +271,26 @@ let end_pos_of_loc loc =
 
 let tok_of_loc loc = OriginTok loc
 
-let tok_of_str_and_bytepos str pos =
+let make ~str ~file ~bytepos =
   let loc =
     {
       str;
-      pos =
-        {
-          charpos = pos;
-          (* info filled in a post-lexing phase, see complete_location *)
-          line = -1;
-          column = -1;
-          file = "NO FILE INFO YET";
-        };
+      (* the pos will be filled in post-lexing phase, see complete_location *)
+      pos = Pos.make file bytepos;
     }
   in
   tok_of_loc loc
 
+(* TODO: we can't rely on Lexing.lexbuf.pos_fname to have
+ * been set correctly by the caller (or need an "origin" when lexbuf is stdin)
+ * and actually in many case where we do a Lexbuf.of_string, the
+ * pos_fname is the empty string
+ *)
 let tok_of_lexbuf lexbuf =
-  tok_of_str_and_bytepos (Lexing.lexeme lexbuf) (Lexing.lexeme_start lexbuf)
+  let fname = lexbuf.Lexing.lex_curr_p.pos_fname in
+  (* see Lexing.zero_pos *)
+  let file = if fname = "" then Fpath_.fake_file else Fpath.v fname in
+  make ~str:(Lexing.lexeme lexbuf) ~file ~bytepos:(Lexing.lexeme_start lexbuf)
 
 let first_loc_of_file file = { str = ""; pos = Pos.first_pos_of_file file }
 let first_tok_of_file file = fake_tok_loc (first_loc_of_file file) ""
@@ -270,7 +298,7 @@ let first_tok_of_file file = fake_tok_loc (first_loc_of_file file) ""
 let rewrap_str s ii =
   match ii with
   | OriginTok pi -> OriginTok { pi with str = s }
-  | FakeTokStr (s, info) -> FakeTokStr (s, info)
+  | FakeTok (s, info) -> FakeTok (s, info)
   | Ab -> Ab
   | ExpandedTok _ ->
       (* ExpandedTok ({ pi with Common.str = s;},vpi) *)
@@ -283,13 +311,175 @@ let str_of_info_fake_ok ii =
   match ii with
   | OriginTok pinfo -> pinfo.str
   | ExpandedTok (pinfo_pp, _vloc) -> pinfo_pp.str
-  | FakeTokStr (_, Some (pi, _)) -> pi.str
-  | FakeTokStr (s, None) -> s
+  | FakeTok (_, Some (pi, _)) -> pi.str
+  | FakeTok (s, None) -> s
   | Ab -> raise (NoTokenLocation "Ab")
 
 let combine_toks x xs =
-  let str = xs |> List.map str_of_info_fake_ok |> String.concat "" in
+  let str = xs |> List_.map str_of_info_fake_ok |> String.concat "" in
   tok_add_s str x
+
+let count_char c str =
+  String.fold_left
+    (fun sum c2 -> if Char.equal c c2 then sum + 1 else sum)
+    0 str
+
+(*
+   Track the current offset in the line (column, 0-based).
+   This function looks for newlines in a string to be added to a buffer
+   and updates the current column accordingly.
+*)
+let update_column current_column str =
+  match String.rindex_opt str '\n' with
+  | None -> current_column := !current_column + String.length str
+  | Some newline_pos ->
+      let column = String.length str - (newline_pos + 1) in
+      assert (column >= 0);
+      current_column := column
+
+(*
+   Goal: see mli.
+
+   Constraints:
+   - preserve the byte offset between the start of tokens.
+   - preserve the newline offset between the start of tokens.
+
+   Weird things to keep in mind:
+   - there's no guarantee that the token's original locations are in sequential
+     order and don't overlap.
+   - a token may contain newline characters.
+   - the ignorable newline string to be inserted may be longer than the
+     amount of space available (e.g. the original syntax was using
+     a single newline character LF but we insert BACKSLASH-LF)
+
+   Algorithm: Create a buffer, track byte count and line count.
+   Before adding a token, compare the position of the token start in the
+   source file against the current position given by the number bytes and
+   newlines added to the buffer so far.
+   Add as many newline sequences as needed to fix the line count.
+   Adjust the byte count accordingly. Add as many blanks as needed to
+   fix the byte count.
+
+   Using the Buffer.t type, the byte count is tracked automatically
+   and returned by Buffer.length. The newline count is tracked with a ref.
+*)
+let combine_sparse_toks ?(ignorable_newline = "\n") ?(ignorable_blank = ' ')
+    first_tok toks =
+  if count_char '\n' ignorable_newline <> 1 then
+    invalid_arg
+      "Tok.combine_sparse_toks: ignorable_newline must contain exactly one \
+       newline character";
+  if Char.equal ignorable_blank '\n' then
+    invalid_arg "Tok.combine_sparse_toks: ignorable_blank may not be a newline";
+  let column_after_an_ignorable_newline =
+    match String.rindex_opt ignorable_newline '\n' with
+    | Some newline_pos ->
+        (* 0 if ignorable_newline ends with '\n' as is usually the case *)
+        String.length ignorable_newline - (newline_pos + 1)
+    | None -> assert false
+  in
+  match loc_of_tok first_tok with
+  | Error _ -> None
+  | Ok { pos = orig_pos; _ } ->
+      let current_line = ref orig_pos.line in
+      let current_column = ref orig_pos.column in
+      let buf = Buffer.create 100 in
+      let add_tok tok =
+        match loc_of_tok tok with
+        | Error _ -> ()
+        | Ok { str; pos } ->
+            (*
+           Insert padding before the token string to match the original
+           line number, column, and byte offset.
+
+           Various conditions can make this impossible. Examples include:
+           - The decoded tokens use more space than the source
+             e.g. "(x)" gets decoded into "begin x end" or some character
+             that didn't escaping in the source becomes escaped such
+             as "<" becoming "&lt;", or "&lt;" became "&#60;".
+           - The newline we insert as the string 'ignorable_newline'
+             can be longer than the original newline e.g. the original
+             was a single newline character but out of precaution,
+             'ignorable_newline' is a line continuation "\\\n" (2 bytes).
+             So, parsing "a\nb" into two tokens ["a"; "b"] result in
+             the string "a\\\nb" which has the correct number of newlines
+             and presumably has correct syntax but shifts "b" by one byte.
+
+           Priority is given to getting (line, column) right over the byte
+           offset.
+
+           Important: the line number and column number must not exceed
+           the original values, otherwise it's possible they can't be
+           found in the source file when converting a (line, col) position
+           into a bytepos by consulting the original file.
+        *)
+            let missing_newlines = max 0 (pos.line - !current_line) in
+            let missing_newline_bytes =
+              missing_newlines * String.length ignorable_newline
+            in
+            let column_after_adding_missing_newlines =
+              if missing_newlines > 0 then column_after_an_ignorable_newline
+              else !current_column
+            in
+            let missing_indent =
+              max 0 (pos.column - column_after_adding_missing_newlines)
+            in
+            let missing_bytes =
+              max 0
+                (pos.bytepos - orig_pos.bytepos - missing_newline_bytes
+               - missing_indent)
+            in
+            (* It's safe to insert missing bytes only if they're followed
+               by a newline that resets the indentation. *)
+            if missing_newlines > 0 then
+              for (* Adjust bytepos *)
+                  _ = 1 to missing_bytes do
+                Buffer.add_char buf ignorable_blank;
+                incr current_column
+              done;
+            (* Adjust line number *)
+            for _ = 1 to missing_newlines do
+              Buffer.add_string buf ignorable_newline;
+              update_column current_column ignorable_newline
+            done;
+            (* Adjust column number *)
+            for _ = 1 to missing_indent do
+              Buffer.add_char buf ignorable_blank;
+              incr current_column
+            done;
+            (* Add the token string *)
+            Buffer.add_string buf str;
+            update_column current_column str;
+            let newlines_in_tok = count_char '\n' str in
+            current_line := !current_line + missing_newlines + newlines_in_tok
+      in
+      List.iter add_tok (first_tok :: toks);
+      let str = Buffer.contents buf in
+      Some (OriginTok { str; pos = orig_pos })
+
+let empty_tok_after tok : t =
+  match loc_of_tok tok with
+  | Ok loc ->
+      let prev_len = String.length loc.str in
+      let loc =
+        {
+          str = "";
+          pos =
+            {
+              loc.pos with
+              bytepos = loc.pos.bytepos + prev_len;
+              column = loc.pos.column + prev_len;
+            };
+        }
+      in
+      tok_of_loc loc
+  | Error _ -> rewrap_str "" tok
+
+let combine_bracket_contents (open_, xs, _close) =
+  let toks = List_.map snd xs in
+  match toks with
+  | x :: xs -> combine_toks x xs
+  | [] -> empty_tok_after open_
 
 let split_tok_at_bytepos pos ii =
   let loc = unsafe_loc_of_tok ii in
@@ -303,7 +493,7 @@ let split_tok_at_bytepos pos ii =
       pos =
         {
           loc.pos with
-          charpos = loc.pos.charpos + pos;
+          bytepos = loc.pos.bytepos + pos;
           column = loc.pos.column + pos;
         };
     }
@@ -316,17 +506,18 @@ let split_tok_at_bytepos pos ii =
 
 (* TODO? move to Pos.ml and use Pos.t instead *)
 let adjust_loc_wrt_base base_loc loc =
-  (* Note that charpos and columns are 0-based, whereas lines are 1-based. *)
+  (* Note that bytepos and columns are 0-based, whereas lines are 1-based. *)
+  let base_pos = base_loc.pos in
+  let pos = loc.pos in
   {
     loc with
     pos =
       {
-        charpos = base_loc.pos.charpos + loc.pos.charpos;
-        line = base_loc.pos.line + loc.pos.line - 1;
+        bytepos = base_pos.bytepos + pos.bytepos;
+        line = base_pos.line + pos.line - 1;
         column =
-          (if loc.pos.line =|= 1 then base_loc.pos.column + loc.pos.column
-          else loc.pos.column);
-        file = base_loc.pos.file;
+          (if pos.line =|= 1 then base_pos.column + pos.column else pos.column);
+        file = base_pos.file;
       };
   }
 
@@ -334,7 +525,7 @@ let fix_location fix ii =
   match ii with
   | OriginTok pi -> OriginTok (fix pi)
   | ExpandedTok (pi, vloc) -> ExpandedTok (fix pi, vloc)
-  | FakeTokStr (s, vloc_opt) -> FakeTokStr (s, vloc_opt)
+  | FakeTok (s, vloc_opt) -> FakeTok (s, vloc_opt)
   | Ab -> Ab
 
 let adjust_tok_wrt_base base_loc ii =
@@ -346,7 +537,7 @@ let fix_pos fix loc = { loc with pos = fix loc.pos }
 (* Adjust line x col *)
 (*****************************************************************************)
 
-let complete_location filename table (x : location) =
+let complete_location (filename : Fpath.t) table (x : location) =
   { x with pos = Pos.complete_position filename table x.pos }
 
 (*
@@ -426,27 +617,27 @@ let compare_pos ii1 ii2 =
   let get_pos = function
     | OriginTok pi -> Real pi
     (* todo? I have this for lang_php/
-        | FakeTokStr (s, Some (pi_orig, offset)) ->
+        | FakeTok (s, Some (pi_orig, offset)) ->
             Virt (pi_orig, offset)
     *)
-    | FakeTokStr _ -> raise (NoTokenLocation "compare_pos: FakeTokStr")
+    | FakeTok _ -> raise (NoTokenLocation "compare_pos: FakeTok")
     | Ab -> raise (NoTokenLocation "compare_pos: Ab")
     | ExpandedTok (_pi_pp, (pi_orig, offset)) -> Virt (pi_orig, offset)
   in
   let pos1 = get_pos ii1 in
   let pos2 = get_pos ii2 in
   match (pos1, pos2) with
-  | Real p1, Real p2 -> compare p1.pos.charpos p2.pos.charpos
+  | Real p1, Real p2 -> Int.compare p1.pos.bytepos p2.pos.bytepos
   | Virt (p1, _), Real p2 ->
-      if compare p1.pos.charpos p2.pos.charpos =|= -1 then -1 else 1
+      if Int.compare p1.pos.bytepos p2.pos.bytepos =|= -1 then -1 else 1
   | Real p1, Virt (p2, _) ->
-      if compare p1.pos.charpos p2.pos.charpos =|= 1 then 1 else -1
+      if Int.compare p1.pos.bytepos p2.pos.bytepos =|= 1 then 1 else -1
   | Virt (p1, o1), Virt (p2, o2) -> (
-      let poi1 = p1.pos.charpos in
-      let poi2 = p2.pos.charpos in
-      match compare poi1 poi2 with
+      let poi1 = p1.pos.bytepos in
+      let poi2 = p2.pos.bytepos in
+      match Int.compare poi1 poi2 with
       | -1 -> -1
-      | 0 -> compare o1 o2
+      | 0 -> Int.compare o1 o2
       | 1 -> 1
       | _ -> raise Impossible)
 

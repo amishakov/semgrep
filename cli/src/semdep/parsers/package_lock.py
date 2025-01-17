@@ -7,16 +7,21 @@ from typing import Dict
 from typing import List
 from typing import Optional
 from typing import Set
+from typing import Tuple
 
+from semdep.parsers.util import DependencyFileToParse
+from semdep.parsers.util import DependencyParserError
 from semdep.parsers.util import extract_npm_lockfile_hash
 from semdep.parsers.util import JSON
 from semdep.parsers.util import json_doc
-from semdep.parsers.util import ParserName
-from semdep.parsers.util import safe_path_parse
+from semdep.parsers.util import safe_parse_lockfile_and_manifest
 from semdep.parsers.util import transitivity
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Ecosystem
 from semgrep.semgrep_interfaces.semgrep_output_v1 import FoundDependency
+from semgrep.semgrep_interfaces.semgrep_output_v1 import Fpath
+from semgrep.semgrep_interfaces.semgrep_output_v1 import Jsondoc
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Npm
+from semgrep.semgrep_interfaces.semgrep_output_v1 import ScaParserName
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Transitive
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Transitivity
 from semgrep.verbose_logging import getLogger
@@ -24,7 +29,27 @@ from semgrep.verbose_logging import getLogger
 logger = getLogger(__name__)
 
 
-def parse_packages_field(deps: Dict[str, JSON]) -> List[FoundDependency]:
+def parse_package_name(package_path: str) -> str:
+    """
+    Utility method for parsing a package name from the "packages" field
+    Splits the package_path and uses the last element of each path as the dependency's name. In some cases, the path
+    may contain a scope (https://docs.npmjs.com/cli/v8/using-npm/scope) in the second-to-last path component,
+    so we check for that as well.
+    """
+    split_package_path = package_path.split("/")
+    if (
+        len(split_package_path) >= 2 and "@" in split_package_path[-2]
+    ):  # The dependency has a scope, so include it in the name
+        return "/".join(split_package_path[-2:])
+    else:
+        return split_package_path[-1]
+
+
+def parse_packages_field(
+    lockfile_path: Path,
+    deps: Dict[str, JSON],
+    manifest_path: Optional[Path],
+) -> List[FoundDependency]:
     try:
         manifest_deps = set(deps[""].as_dict()["dependencies"].as_dict().keys())
     except KeyError:
@@ -33,9 +58,7 @@ def parse_packages_field(deps: Dict[str, JSON]) -> List[FoundDependency]:
     for package, dep_json in deps.items():
         fields = dep_json.as_dict()
         version = fields.get("version")
-        package_name = package[
-            package.rfind("node_modules") + 13 :
-        ]  # we only want the stuff after the final 'node_modules'
+        package_name = parse_package_name(package)
         if not version:
             logger.info(f"no version for dependency: {package}")
             continue
@@ -56,17 +79,25 @@ def parse_packages_field(deps: Dict[str, JSON]) -> List[FoundDependency]:
                 if integrity
                 else {},
                 resolved_url=resolved_url,
-                transitivity=Transitivity(Transitive())
-                if nested
-                else transitivity(manifest_deps, [package]),
+                transitivity=Transitivity(Transitive()) if nested
+                # The manifest stores the pure package names but the deps names are all relative paths (prefix'd with 'node_modules'),
+                # so check to see if `package_name` (without the 'node_modules' prefix) is present in the manifest.
+                # https://docs.npmjs.com/cli/v10/configuring-npm/package-lock-json#packages
+                else transitivity(manifest_deps, [package_name]),
                 line_number=dep_json.line_number,
+                lockfile_path=Fpath(str(lockfile_path)),
+                manifest_path=Fpath(str(manifest_path)) if manifest_path else None,
             )
         )
     return output
 
 
 def parse_dependencies_field(
-    deps: Dict[str, JSON], manifest_deps: Optional[Set[str]], nested: bool
+    lockfile_path: Path,
+    deps: Dict[str, JSON],
+    manifest_deps: Optional[Set[str]],
+    nested: bool,
+    manifest_path: Optional[Path],
 ) -> List[FoundDependency]:
     # Dependency dicts in a package-lock.json can be nested:
     # {"foo" : {stuff, "dependencies": {"bar": stuff, "dependencies": {"baz": stuff}}}}
@@ -98,28 +129,42 @@ def parse_dependencies_field(
                 if nested
                 else transitivity(manifest_deps, [package]),
                 line_number=dep_json.line_number,
+                lockfile_path=Fpath(str(lockfile_path)),
+                manifest_path=Fpath(str(manifest_path)) if manifest_path else None,
             )
         )
         nested_deps = fields.get("dependencies")
         if nested_deps:
             output.extend(
-                parse_dependencies_field(nested_deps.as_dict(), manifest_deps, True)
+                parse_dependencies_field(
+                    lockfile_path,
+                    nested_deps.as_dict(),
+                    manifest_deps,
+                    True,
+                    manifest_path,
+                )
             )
     return output
 
 
 def parse_package_lock(
     lockfile_path: Path, manifest_path: Optional[Path]
-) -> List[FoundDependency]:
-    lockfile_json_opt = safe_path_parse(lockfile_path, json_doc, ParserName.jsondoc)
-    if not lockfile_json_opt:
-        return []
+) -> Tuple[List[FoundDependency], List[DependencyParserError]]:
+    parsed_lockfile, parsed_manifest, errors = safe_parse_lockfile_and_manifest(
+        DependencyFileToParse(lockfile_path, json_doc, ScaParserName(Jsondoc())),
+        DependencyFileToParse(manifest_path, json_doc, ScaParserName(Jsondoc()))
+        if manifest_path
+        else None,
+    )
 
-    lockfile_json = lockfile_json_opt.as_dict()
+    if not parsed_lockfile:
+        return [], errors
+
+    lockfile_json = parsed_lockfile.as_dict()
 
     lockfile_version_opt = lockfile_json.get("lockfileVersion")
     if not lockfile_version_opt:
-        return []
+        return [], errors
 
     lockfile_version = lockfile_version_opt.as_int()
 
@@ -129,23 +174,30 @@ def parse_package_lock(
         deps = lockfile_json.get("packages")
         if deps is None:
             logger.debug("Found package-lock with no 'packages'")
-            return []
-        return parse_packages_field(deps.as_dict())
+            return [], errors
+        return (
+            parse_packages_field(lockfile_path, deps.as_dict(), manifest_path),
+            errors,
+        )
     else:
         deps = lockfile_json.get("dependencies")
         if deps is None:
             logger.debug("Found package-lock with no 'dependencies'")
-            return []
+            return [], errors
 
-        manifest_json_opt = safe_path_parse(manifest_path, json_doc, ParserName.jsondoc)
-        if not manifest_json_opt:
+        if not parsed_manifest:
             manifest_deps = None
         else:
-            manifest_json = manifest_json_opt.as_dict()
+            manifest_json = parsed_manifest.as_dict()
             manifest_deps = (
                 set(manifest_json["dependencies"].as_dict().keys())
                 if "dependencies" in manifest_json
                 else set()
             )
 
-        return parse_dependencies_field(deps.as_dict(), manifest_deps, False)
+        return (
+            parse_dependencies_field(
+                lockfile_path, deps.as_dict(), manifest_deps, False, manifest_path
+            ),
+            errors,
+        )

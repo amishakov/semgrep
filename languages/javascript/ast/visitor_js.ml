@@ -389,7 +389,7 @@ let (mk_visitor : visitor_in -> visitor_out) =
       } =
     v_wrap v_function_kind f_kind;
     let arg = v_list v_attribute v_f_props in
-    let arg = v_list v_parameter_binding v_f_params in
+    let arg = v_bracket (v_list v_parameter_binding) v_f_params in
     let arg = v_stmt v_f_body in
     v_option v_type_ f_rettype;
     ()
@@ -433,8 +433,8 @@ let (mk_visitor : visitor_in -> visitor_out) =
   and v_keyword_attribute _ = ()
   and v_class_kind _ = ()
   and v_parent = function
-    | Common.Left e -> v_expr e
-    | Common.Right t -> v_type_ t
+    | Either.Left e -> v_expr e
+    | Either.Right t -> v_type_ t
   and v_obj_ v = v_bracket (v_list v_property) v
   and v_class_definition
       {

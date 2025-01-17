@@ -1,12 +1,20 @@
 (* Yoann Padioleau
  *
- * Copyright (C) 2022, 2023 r2c
+ * Copyright (C) 2022, 2023 Semgrep Inc.
  *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public License
+ * version 2.1 as published by the Free Software Foundation, with the
+ * special exception on linking described in file LICENSE.
+ *
+ * This library is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the file
+ * LICENSE for more details.
  *)
 open Common
+open Sexplib.Std
 module G = AST_generic
-
-let logger = Logging.get_logger [ __MODULE__ ]
 
 (*****************************************************************************)
 (* Prelude *)
@@ -28,6 +36,9 @@ let logger = Logging.get_logger [ __MODULE__ ]
  *
  * These types are polymorphic to support the Pro Engine, which represents
  * resolved names differently.
+ *
+ * history: this used to be in semgrep-pro but was simpler to move it in
+ * OSS because ???
  *)
 
 (*****************************************************************************)
@@ -41,6 +52,7 @@ class virtual ['self] map_parent =
      * recurse down. We should put alternate names in the type parameter anyway.
      * *)
     method visit_alternate_name _env x = x
+    method visit_parsed_int _env x = x
   end
 
 (*****************************************************************************)
@@ -75,7 +87,7 @@ and 'resolved t =
   (* TODO: generalize to other containers? But then use a TyContainer
    * in SAST.ml? *)
   (* int option for the cases where we know the size of the array *)
-  | Array of int option * 'resolved t
+  | Array of (Parsed_int.t[@name "parsed_int"]) option * 'resolved t
   | Function of 'resolved function_type
   | Pointer of 'resolved t
   (* todos (bailout) *)
@@ -108,6 +120,7 @@ and 'resolved parameter_classic = {
 [@@deriving
   show { with_path = false },
     eq,
+    sexp,
     visitors { variety = "map"; ancestors = [ "map_parent" ] }]
 
 (*****************************************************************************)
@@ -166,14 +179,16 @@ let todo_kind_to_ast_generic_todo_kind (x : todo_kind) : G.todo_kind =
  * coupling: Inverse of ast_generic_type_of_builtin_type *)
 let builtin_type_of_string _langTODO str =
   match str with
+  | "Integer"
   | "int"
   | "long"
-  | "Integer"
+  | "Int"
   | "Long" ->
       Some Int
   | "float"
   | "double"
-  | "Float" ->
+  | "Float"
+  | "Double" ->
       Some Float
   | "str"
   | "string"
@@ -221,7 +236,7 @@ let builtin_type_of_type lang t =
  * token is needed. This allows the resulting synthetic AST to be used in places
  * that require location information.
  * *)
-let rec to_ast_generic_type_ ?(tok = None) lang
+let rec to_ast_generic_type_ ?tok lang
     (f : 'a -> G.alternate_name list -> G.name) (x : 'a t) : G.type_ option =
   let make_tok str =
     match tok with
@@ -248,17 +263,13 @@ let rec to_ast_generic_type_ ?(tok = None) lang
   | Builtin x ->
       Some (ast_generic_type_of_builtin_type ~tok:(make_tok "") lang x)
   | Array (size, ty) ->
-      let size =
-        Option.map
-          (fun n -> G.L (G.Int (Some n, make_tok (string_of_int n))) |> G.e)
-          size
-      in
+      let size = Option.map (fun pi -> G.L (G.Int pi) |> G.e) size in
       let* ty = to_ast_generic_type_ lang f ty in
       Some (G.TyArray (Tok.unsafe_fake_bracket size, ty) |> G.t)
   | Function (params, tret) ->
       let params =
         params
-        |> Common.map (function
+        |> List_.map (function
              | Param { pident; ptype } -> (
                  let topt = to_ast_generic_type_ lang f ptype in
                  match topt with

@@ -34,7 +34,6 @@
 
 *)
 
-open Printf
 open Doc_AST
 open Pattern_AST
 
@@ -258,7 +257,7 @@ let rec match_ (conf : conf) ~(dots : dots option) (env : env)
     (cont :
       dots:dots option -> env -> Loc.t -> Pattern_AST.node list -> match_result)
     : match_result =
-  if !debug then Print_match.print pat doc;
+  if !debug then Dump_match.print pat doc;
   match (pat, doc) with
   | [], doc -> (
       match doc_matches_dots ~dots last_loc doc with
@@ -403,11 +402,22 @@ let fold_block_starts acc (doc : Doc_AST.node list) f =
 let starts_with_dots (pat : Pattern_AST.node list) =
   match pat with
   | Dots _ :: _ -> true
-  | _ -> false
+  | (Atom _ | List _ | End) :: _
+  | [] ->
+      false
+
+let rec ends_with_dots (pat : Pattern_AST.node list) =
+  match pat with
+  | [ Dots _; End ] -> true
+  | [ _; _ ]
+  | [ _ ]
+  | [] ->
+      false
+  | _ :: pat -> ends_with_dots pat
 
 let convert_named_captures env =
   Env.bindings env
-  |> Common.map (fun (name, (loc, value)) -> (name, { value; loc }))
+  |> List_.map (fun (name, (loc, value)) -> (name, { value; loc }))
 
 (*
 let to_string src match_ =
@@ -446,12 +456,20 @@ let convert_capture src (start_pos, _) (_, end_pos) =
      |--------------| discard      (4)
              |------| keep
 
+   As an exception to rule (4), if the pattern ends in an ellipsis, the longer
+   match is returned:
+
+     pattern: a ...
+
+     |--------------| keep      (5)
+             |------| discard
+
    Algorithm:
 
    1. Proceed from left to right. For each start position, try to match
       the pattern. The shortest match at this position is returned
       by the 'match_' function (handles case shown on fig. 3).
-   2. Any match has the send end position as an earlier (longer) match,
+   2. Any match has the same end position as an earlier (longer) match,
       the earlier match is discarded (handles case shown on fig. 4).
 
    Implementation:
@@ -469,6 +487,7 @@ let really_search param src pat doc =
   in
   let end_loc_tbl = Hashtbl.create 100 in
   let fold = if starts_with_dots pat then fold_block_starts else fold_all in
+  let prefer_longer_match = ends_with_dots pat in
   fold [] doc (fun matches start_loc doc ->
       let start_pos, _ = start_loc in
       (* At the start, nothing has been matched. If `last_loc = start_loc` then
@@ -482,10 +501,17 @@ let really_search param src pat doc =
             let named_captures = convert_named_captures env in
             { region; capture; named_captures }
           in
-          (* If two matches end at the same location, prefer the shorter one.
-             The replacement in the table marks any earlier, longer match
-             as undesirable. *)
-          Hashtbl.replace end_loc_tbl last_loc match_;
+          if prefer_longer_match then
+            (* rule 5: prefer the longer match that's already in the table. *)
+            match Hashtbl.mem end_loc_tbl last_loc with
+            | true -> ()
+            | false -> Hashtbl.add end_loc_tbl last_loc match_
+          else
+            (* rule 4 (default case)
+               If two matches end at the same location, prefer the shorter one.
+               The replacement in the table marks any earlier, longer match
+               as undesirable. *)
+            Hashtbl.replace end_loc_tbl last_loc match_;
           match_ :: matches
       | Fail -> matches)
   |> List.rev
@@ -508,70 +534,3 @@ let timef f =
   (res, t2 -. t1)
 
 let timed_search param src pat doc = timef (fun () -> search param src pat doc)
-
-let ansi_highlight s =
-  match s with
-  | "" -> s
-  | s -> ANSITerminal.(sprintf [ Bold; green ] "%s" s)
-
-let make_separator_printer () =
-  let is_first = ref true in
-  fun () -> if !is_first then is_first := false else print_char '\n'
-
-let print ?(highlight = false)
-    ?(print_optional_separator = make_separator_printer ()) src matches =
-  let highlight_fun = if highlight then Some ansi_highlight else None in
-  let line_prefix =
-    match Src_file.source src with
-    | File path -> sprintf "%s:" path
-    | Stdin
-    | String
-    | Channel ->
-        ""
-  in
-  List.iter
-    (fun match_ ->
-      print_optional_separator ();
-      let start_loc, end_loc = match_.region in
-      if !debug then
-        printf "match from %s to %s\n" (Loc.show start_loc) (Loc.show end_loc);
-      Src_file.lines_of_loc_range ?highlight:highlight_fun ~line_prefix src
-        start_loc end_loc
-      |> print_string)
-    matches
-
-let print_errors ?(highlight = false) errors =
-  let error_prefix =
-    if highlight then ANSITerminal.(sprintf [ Bold; red ] "%s" "error:")
-    else "error:"
-  in
-  List.iter
-    (fun (src, error) ->
-      let src_prefix =
-        match Src_file.source src with
-        | File path -> sprintf "%s: " path
-        | Stdin
-        | String
-        | Channel ->
-            ""
-      in
-      eprintf "%s %s%s\n" error_prefix src_prefix error.Parse_pattern.msg)
-    errors
-
-let print_nested_results ?(with_time = false) ?highlight
-    ?(print_optional_separator = make_separator_printer ()) doc_matches errors =
-  let total_parse_time = ref 0. in
-  let total_match_time = ref 0. in
-  List.iter
-    (fun (src, pat_matches, parse_time, _run_time) ->
-      total_parse_time := !total_parse_time +. parse_time;
-      List.iter
-        (fun (_pat_id, matches, match_time) ->
-          total_match_time := !total_match_time +. match_time;
-          print ?highlight ~print_optional_separator src matches)
-        pat_matches)
-    doc_matches;
-  if with_time then
-    eprintf "parse time: %.6f s\nmatch time: %.6f s\n" !total_parse_time
-      !total_match_time;
-  print_errors ?highlight errors

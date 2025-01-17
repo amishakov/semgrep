@@ -14,14 +14,18 @@ from semdep.external.parsy import success
 from semdep.external.parsy import whitespace
 from semdep.parsers import preprocessors
 from semdep.parsers.util import consume_line
+from semdep.parsers.util import DependencyFileToParse
+from semdep.parsers.util import DependencyParserError
 from semdep.parsers.util import mark_line
-from semdep.parsers.util import ParserName
-from semdep.parsers.util import safe_path_parse
+from semdep.parsers.util import safe_parse_lockfile_and_manifest
 from semdep.parsers.util import transitivity
 from semdep.parsers.util import upto
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Ecosystem
 from semgrep.semgrep_interfaces.semgrep_output_v1 import FoundDependency
+from semgrep.semgrep_interfaces.semgrep_output_v1 import Fpath
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Pypi
+from semgrep.semgrep_interfaces.semgrep_output_v1 import Requirements
+from semgrep.semgrep_interfaces.semgrep_output_v1 import ScaParserName
 
 
 whitespace = whitespace | string("\\\n")
@@ -94,27 +98,36 @@ COMMENT_REGEX = r"(^|\s+)#.*$"
 
 
 def get_manifest_deps(
-    parsed: Optional[List[Tuple[int, Tuple[str, List[Tuple[str, str]]]]]]
+    parsed: Optional[List[Tuple[int, Tuple[str, List[Tuple[str, str]]]]]],
 ) -> Optional[Set[str]]:
     return {package for _, (package, _) in parsed} if parsed else None
 
 
 def parse_requirements(
     lockfile_path: Path, manifest_path: Optional[Path]
-) -> List[FoundDependency]:
-    deps = safe_path_parse(
-        lockfile_path,
-        requirements,
-        ParserName.requirements,
-        preprocess=preprocessors.CommentRemover(),
+) -> Tuple[List[FoundDependency], List[DependencyParserError]]:
+    parsed_lockfile, parsed_manifest, errors = safe_parse_lockfile_and_manifest(
+        DependencyFileToParse(
+            lockfile_path,
+            requirements,
+            ScaParserName(Requirements()),
+            preprocessors.CommentRemover(),
+        ),
+        DependencyFileToParse(
+            manifest_path,
+            requirements,
+            ScaParserName(Requirements()),
+            preprocessors.CommentRemover(),
+        )
+        if manifest_path
+        else None,
     )
-    if deps is None:
-        return []
-    manifest_deps = get_manifest_deps(
-        safe_path_parse(manifest_path, requirements, ParserName.requirements)
-    )
+    if parsed_lockfile is None:
+        return [], errors
+
+    manifest_deps = get_manifest_deps(parsed_manifest)
     output = []
-    for line_number, (package, constraints) in deps:
+    for line_number, (package, constraints) in parsed_lockfile:
         # A package with no pinned version, skip it
         if len(constraints) != 1:
             continue
@@ -124,12 +137,14 @@ def parse_requirements(
             continue
         output.append(
             FoundDependency(
-                package=package,
+                package=package.lower(),
                 version=version,
                 ecosystem=Ecosystem(Pypi()),
                 allowed_hashes={},
                 transitivity=transitivity(manifest_deps, [package]),
                 line_number=line_number,
+                lockfile_path=Fpath(str(lockfile_path)),
+                manifest_path=Fpath(str(manifest_path)) if manifest_path else None,
             )
         )
-    return output
+    return output, errors

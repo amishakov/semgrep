@@ -13,7 +13,7 @@
  *
  * Extended by Yoann Padioleau to support more recent versions of Java.
  * Copyright (C) 2011 Facebook
- * Copyright (C) 2020-2022 r2c
+ * Copyright (C) 2020-2024 Semgrep Inc.
  *)
 
 (*****************************************************************************)
@@ -45,12 +45,14 @@
 (* ------------------------------------------------------------------------- *)
 (* Token/info *)
 (* ------------------------------------------------------------------------- *)
-type tok = Tok.t [@@deriving show]
-type 'a wrap = 'a * tok [@@deriving show]
+type 'a wrap = 'a * Tok.t [@@deriving show]
 type 'a list1 = 'a list (* really should be 'a * 'a list *) [@@deriving show]
 
 (* round(), square[], curly{}, angle<> brackets *)
-type 'a bracket = tok * 'a * tok [@@deriving show]
+type 'a bracket = Tok.t * 'a * Tok.t [@@deriving show]
+
+(* semicolon ";" *)
+type sc = Tok.t [@@deriving show]
 
 (* ------------------------------------------------------------------------- *)
 (* Ident, qualifier *)
@@ -70,7 +72,7 @@ type typ =
   | TClass of class_type
   | TArray of typ bracket
   (* since Java 10 *)
-  | TVar of tok (* 'var' *)
+  | TVar of Tok.t (* 'var' *)
 
 (* class or interface or enum type actually *)
 and class_type = (ident * type_arguments option) list1
@@ -78,7 +80,7 @@ and class_type = (ident * type_arguments option) list1
 and type_argument =
   | TArgument of ref_type
   | TWildCard of
-      tok (* '?' *)
+      Tok.t (* '?' *)
       * (bool wrap (* extends|super, true = super *) * ref_type) option
 
 and type_arguments = type_argument list bracket
@@ -92,7 +94,7 @@ and ref_type = typ [@@deriving show { with_path = false }]
 type type_parameter =
   | TParam of ident * ref_type list (* extends *)
   (* sgrep-ext: *)
-  | TParamEllipsis of tok
+  | TParamEllipsis of Tok.t
 [@@deriving show { with_path = false }]
 
 (* ------------------------------------------------------------------------- *)
@@ -125,7 +127,7 @@ and modifiers = modifier wrap list
 (* Annotation *)
 (* ------------------------------------------------------------------------- *)
 and annotation =
-  tok (* @ *) * qualified_ident * annotation_element bracket option
+  Tok.t (* @ *) * qualified_ident * annotation_element bracket option
 
 and annotation_element =
   | AnnotArgValue of element_value
@@ -139,7 +141,7 @@ and element_value =
 
 and annotation_pair =
   | AnnotPair of (ident * element_value)
-  | AnnotPairEllipsis of tok
+  | AnnotPairEllipsis of Tok.t
 
 and name_or_class_type = identifier_ list
 
@@ -175,28 +177,28 @@ and expr =
    * old: | Name of name
    *)
   | NameId of ident
-  | This of tok
+  | This of Tok.t
   (* used in Dot but also can be in Call *)
   (* TODO: Super of tok *)
   (* This is used only in the context of annotations *)
   | NameOrClassType of name_or_class_type
   | Literal of literal
   (* Xxx.class *)
-  | ClassLiteral of typ * tok (* 'class' *)
+  | ClassLiteral of typ * Tok.t (* 'class' *)
   (* tree-sitter-only: not that ident can be the special "new" *)
-  | MethodRef of expr_or_type * tok (* :: *) * type_arguments option * ident
+  | MethodRef of expr_or_type * Tok.t (* :: *) * type_arguments option * ident
   (* the 'decls option' is for anon classes *)
-  | NewClass of tok (* new *) * typ * arguments * decls bracket option
+  | NewClass of Tok.t (* new *) * typ * arguments * decl list bracket option
   (* see tests/java/parsing/NewQualified.java *)
   | NewQualifiedClass of
       expr
-      * tok (* . *)
-      * tok (* new *)
+      * Tok.t (* . *)
+      * Tok.t (* new *)
       * typ
       * arguments
-      * decls bracket option
+      * decl list bracket option
   (* the int counts the number of [], new Foo[][] => 2 *)
-  | NewArray of tok * typ * expr list * int * init option
+  | NewArray of Tok.t * typ * expr list * int * init option
     (* TODO: QualifiedNew *)
   | Call of expr * arguments
   (* How is parsed X.y ? Could be a Name [X;y] or Dot (Name [X], y)?
@@ -216,93 +218,93 @@ and expr =
    * The problem is that more things in x.y.z can be a Dot, but to know
    * that requires semantic information about the type of x and y.
    *)
-  | Dot of expr * tok * ident
+  | Dot of expr * Tok.t * ident
   | ArrayAccess of expr * expr bracket
   | Unary of AST_generic.operator (* +/-/~/! *) wrap * expr
   | Postfix of expr * AST_generic.incr_decr wrap
   | Prefix of AST_generic.incr_decr wrap * expr
   | Infix of expr * AST_generic.operator wrap * expr
-  | SwitchE of tok * expr * (cases * stmts) list (* TODO bracket *)
+  | SwitchE of Tok.t * expr * (cases * stmts) list (* TODO bracket *)
   (* usually just a single typ, but can also have intersection type t1 & t2 *)
   | Cast of typ list1 bracket * expr
   | InstanceOf of expr * ref_type
   | Conditional of expr * expr * expr
   (* ugly java, like in C assignement is an expression not a statement :( *)
-  | Assign of expr * tok * expr
+  | Assign of expr * Tok.t * expr
   | AssignOp of expr * AST_generic.operator wrap * expr
   (* javaext: 1.? *)
-  | Lambda of parameters * tok (* -> *) * stmt
+  | Lambda of parameters * Tok.t (* -> *) * stmt
   (* sgrep-ext: *)
-  | Ellipsis of tok
+  | Ellipsis of Tok.t
   | DeepEllipsis of expr bracket
   | TypedMetavar of ident * typ
-  | ObjAccessEllipsis of expr * tok (* ... *)
+  | ObjAccessEllipsis of expr * Tok.t (* ... *)
 
 and literal =
-  | Int of int option wrap
+  | Int of Parsed_int.t
   | Float of float option wrap
   | String of string wrap (* TODO: bracket *)
   | Char of string wrap
   | Bool of bool wrap
-  | Null of tok
+  | Null of Tok.t
   (* alt: merge with String? Java 15 *)
   (* TODO? the string contains the enclosing triple quotes for now *)
   | TextBlock of string wrap (* TODO bracket *)
 
 and arguments = expr list bracket
-and expr_or_type = (expr, typ) Common.either
+and expr_or_type = (expr, typ) Either_.t
 
 (*****************************************************************************)
 (* Statement *)
 (*****************************************************************************)
 and stmt =
-  | EmptyStmt of tok (* could be Block [] *)
+  | EmptyStmt of Tok.t (* could be Block [] *)
   | Block of stmts bracket
-  | Expr of expr * tok
-  | If of tok * expr * stmt * stmt option
-  | Switch of tok * expr * (cases * stmts) list (* TODO bracket *)
-  | While of tok * expr * stmt
-  | Do of tok * stmt * expr (* TODO * tok (* ; *) *)
-  | For of tok * for_control * stmt
-  | Break of tok * ident option
-  | Continue of tok * ident option
-  | Return of tok * expr option
+  | Expr of expr * Tok.t
+  | If of Tok.t * expr * stmt * stmt option
+  | Switch of Tok.t * expr * (cases * stmts) list (* TODO bracket *)
+  | While of Tok.t * expr * stmt
+  | Do of Tok.t * stmt * expr (* TODO * sc *)
+  | For of Tok.t * for_control * stmt
+  | Break of Tok.t * ident option
+  | Continue of Tok.t * ident option
+  | Return of Tok.t * expr option
   | Label of ident * stmt
-  | Sync of tok (* 'synchronized' *) * expr (* todo: bracket *) * stmt
-  | Try of tok * resources option * stmt * catches * (tok * stmt) option
-  | Throw of tok * expr
+  | Sync of Tok.t (* 'synchronized' *) * expr (* todo: bracket *) * stmt
+  | Try of Tok.t * resources option * stmt * catches * (Tok.t * stmt) option
+  | Throw of Tok.t * expr
   (* decl as statement *)
-  | LocalVarList of var_with_init list
+  | LocalVarList of var_with_init list * sc
   (* in recent Java, used to be only LocalClass *)
   | DeclStmt of decl
   | DirectiveStmt of directive
   (* javaext: http://java.sun.com/j2se/1.4.2/docs/guide/lang/assert.html *)
-  | Assert of tok * expr * expr option (* assert e or assert e : e2 *)
+  | Assert of Tok.t * expr * expr option (* assert e or assert e : e2 *)
 
 and stmts = stmt list
-and case = Case of (tok * expr) | Default of tok
+and case = Case of (Tok.t * expr) | Default of Tok.t
 and cases = case list
 
 and for_control =
   | ForClassic of for_init * expr list (* TODO: expr option? *) * expr list
   | Foreach of var_definition * expr
   (* sgrep-ext: *)
-  | ForEllipsis of tok
+  | ForEllipsis of Tok.t
 
 and for_init = ForInitVars of var_with_init list | ForInitExprs of expr list
-and catch = tok * catch_exn * stmt
+and catch = Tok.t * catch_exn * stmt
 and catches = catch list
 
 and catch_exn =
   | CatchParam of var_definition * typ list (* union type *)
   (* sgrep-ext: *)
-  | CatchEllipsis of tok
+  | CatchEllipsis of Tok.t
 
 (* javaext: java 8 *)
 and resources = resource list bracket
 
 (* the expr is a an id or a field access *)
-and resource = (var_with_init, expr) Common.either
+and resource = (var_with_init, expr) Either_.t
 
 (*****************************************************************************)
 (* Definitions *)
@@ -321,7 +323,6 @@ and entity = {
 (* variable (local var, parameter) declaration *)
 (* ------------------------------------------------------------------------- *)
 and var_definition = entity
-and vars = var_definition list
 
 (* less: could be merged with var *)
 and var_with_init = { f_var : var_definition; f_init : init option }
@@ -354,11 +355,11 @@ and parameters = parameter_binding list (* TODO bracket *)
 and parameter_binding =
   | ParamClassic of parameter_classic
   (* java-ext: ?? *)
-  | ParamSpread of tok (* ... *) * parameter_classic
+  | ParamSpread of Tok.t (* ... *) * parameter_classic
   (* java-ext: 8, name is always 'this' in parameter *)
   | ParamReceiver of parameter_classic
   (* sgrep-ext: *)
-  | ParamEllipsis of tok
+  | ParamEllipsis of Tok.t
 
 and parameter_classic = var_definition
 and field = var_with_init
@@ -375,14 +376,14 @@ and enum_decl = {
   en_body : enum_body;
 }
 
-and enum_body = enum_constant list * enum_body_decls
+and enum_body = enum_constant list * enum_body_decl list
 (* TODO bracket *)
 
 (* http://docs.oracle.com/javase/1.5.0/docs/guide/language/enums.html *)
 and enum_constant = ident * arguments option * class_body option
 
 (* Not all kind of decls. Restrictions are ?? *)
-and enum_body_decls = decls
+and enum_body_decl = decl
 
 (* ------------------------------------------------------------------------- *)
 (* Class/Interface *)
@@ -390,6 +391,7 @@ and enum_body_decls = decls
 and class_decl = {
   cl_name : ident;
   cl_kind : class_kind wrap;
+  (* TODO: bracket option *)
   cl_tparams : type_parameter list;
   cl_mods : modifiers;
   (* always at None for interface *)
@@ -413,7 +415,7 @@ and class_kind =
   | Record
 
 (* Not all kind of decls. Restrictions are ?? *)
-and class_body = decls bracket
+and class_body = decl list bracket
 
 (*****************************************************************************)
 (* Declaration *)
@@ -425,14 +427,13 @@ and decl =
   (* inside class/interface/enum *)
   | Method of method_decl
   | Field of field
-  | Init of tok option (* static *) * stmt
+  | Init of Tok.t option (* static *) * stmt
   (* java-ext: tree-sitter-only: only in AtInterface class_decl  *)
-  | AnnotationTypeElementTodo of tok
-  | EmptyDecl of tok (* ; *)
+  | AnnotationTypeElementTodo of Tok.t
+  | EmptyDecl of Tok.t (* ; *)
   (* sgrep-ext: allows ... inside interface, class declarations *)
-  | DeclEllipsis of tok
-
-and decls = decl list
+  | DeclEllipsis of Tok.t
+  | DeclMetavarEllipsis of ident
 
 (*****************************************************************************)
 (* Directives *)
@@ -441,8 +442,8 @@ and decls = decl list
  * DirectiveStmt we need the 'and' below.
  *)
 and import =
-  | ImportAll of tok * qualified_ident * tok (* * *)
-  | ImportFrom of tok * qualified_ident * ident
+  | ImportAll of Tok.t * qualified_ident * Tok.t (* * *)
+  | ImportFrom of Tok.t * qualified_ident * ident
 
 (* old: the Package and Import used to be allowed only at the toplevel and
  * followed by a unique class/interface first in a 'compilation_unit' record
@@ -450,10 +451,10 @@ and import =
  *)
 and directive =
   (* The qualified ident can also contain "*" at the very end. *)
-  | Package of tok * qualified_ident * tok (* ; *)
-  (* The tok is for static import (javaext:) *)
-  | Import of tok option (* static *) * import
-  | ModuleTodo of tok
+  | Package of Tok.t * qualified_ident * Tok.t (* ; *)
+  (* The Tok.t is for static import (javaext:) *)
+  | Import of Tok.t option (* static *) * import
+  | ModuleTodo of Tok.t
 [@@deriving show { with_path = false }]
 
 (*****************************************************************************)
@@ -472,10 +473,10 @@ type partial =
   (* the body will be empty in m_body or cl_body *)
   | PartialDecl of decl
   (* partial stmts *)
-  | PartialIf of tok * expr
-  | PartialTry of tok * stmt
+  | PartialIf of Tok.t * expr
+  | PartialTry of Tok.t * stmt
   | PartialCatch of catch
-  | PartialFinally of (tok * stmt)
+  | PartialFinally of (Tok.t * stmt)
 [@@deriving show { with_path = false }]
 
 type any =
@@ -500,26 +501,33 @@ type any =
 (* Helpers *)
 (*****************************************************************************)
 let unwrap = fst
-let fakeInfo ?(next_to = None) str = Tok.FakeTokStr (str, next_to)
-let info_of_ident ident = snd ident
 
 let is_final xs =
-  let xs = List.map fst xs in
+  let xs = List_.map fst xs in
   List.mem Final xs
 
 let is_final_static xs =
-  let xs = List.map fst xs in
+  let xs = List_.map fst xs in
   List.mem Final xs && List.mem Static xs
 
-let rec info_of_identifier_ (id : identifier_) : tok =
+let basic_entity id mods = { name = id; mods; type_ = None }
+let entity_of_id id = basic_entity id []
+
+(* TODO: reuse Tok.fake_tok ? *)
+let fakeInfo ?next_to str = Tok.FakeTok (str, next_to)
+
+(* used for error reporting usually *)
+let rec tok_of_identifier_ (id : identifier_) : Tok.t =
   match id with
   | Id id
   | Id_then_TypeArgs (id, _) ->
       snd id
-  | TypeArgs_then_Id (_, id_) -> info_of_identifier_ id_
+  | TypeArgs_then_Id (_, id_) -> tok_of_identifier_ id_
 
-let basic_entity id mods = { name = id; mods; type_ = None }
-let entity_of_id id = basic_entity id []
+let tok_of_name_or_class_type (x : name_or_class_type) : Tok.t =
+  match x with
+  | [] -> raise (Tok.NoTokenLocation "Ast_java.tok_of_name_or_class_type")
+  | x :: _ -> tok_of_identifier_ x
 
 (*****************************************************************************)
 (* Parsing helpers *)
@@ -560,9 +568,9 @@ let decls f mods vtype vars =
   let dcl (v, init) =
     f { f_var = canon_var mods (Some vtype) v; f_init = init }
   in
-  List.map dcl vars
+  List_.map dcl vars
 
-let typ_of_qualified_id xs = TClass (xs |> List.map (fun id -> (id, None)))
+let typ_of_qualified_id xs = TClass (xs |> List_.map (fun id -> (id, None)))
 
 let name_of_id id =
   (*Name ([[], id]) *)

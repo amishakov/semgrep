@@ -1,6 +1,6 @@
 (* Yoann Padioleau
  *
- * Copyright (C) 2019-2022 r2c
+ * Copyright (C) 2019-2023 Semgrep Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
@@ -12,10 +12,9 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the file
  * LICENSE for more details.
  *)
-open File.Operators
-module E = Semgrep_error_code
-module Out = Output_from_core_t
-module PM = Pattern_match
+module E = Core_error
+module Out = Semgrep_output_v1_t
+module PM = Core_match
 
 (*****************************************************************************)
 (* Prelude *)
@@ -30,9 +29,12 @@ module PM = Pattern_match
  * the matching results corresponding to this id.
  *)
 type pattern_id = Xpattern.pattern_id
+type id_to_match_results = (pattern_id, Core_match.t list ref) Hashtbl.t
 
-(* !This hash table uses the Hashtbl.find_all property! *)
-type id_to_match_results = (pattern_id, Pattern_match.t) Hashtbl.t
+(* alt: prefilter_cache option *)
+type prefilter_config =
+  | PrefilterWithCache of Analyze_rule.prefilter_cache
+  | NoPrefiltering
 
 (* eXtended config.
  * less: we might want to get rid of equivalences at some point as
@@ -49,7 +51,7 @@ type xconfig = {
    * (there's lots of fields in Runner_config.t).
    *)
   matching_explanations : bool;
-  filter_irrelevant_rules : bool;
+  filter_irrelevant_rules : prefilter_config;
 }
 
 type env = {
@@ -58,9 +60,15 @@ type env = {
   (* used by metavariable-pattern to recursively call evaluate_formula *)
   xtarget : Xtarget.t;
   rule : Rule.t;
+  (* as-metavariable: This is here so we can easily pass down
+     `has_as_metavariable` to `evaluate_formula`, which will dictate
+     whether  we should set the `ast_node` field when focusing, as this is
+     only needed for rules  making use of the `as-metavariable` feature.
+  *)
+  has_as_metavariable : bool;
   (* problems found during evaluation, one day these may be caught earlier by
    * the meta-checker *)
-  errors : Report.ErrorSet.t ref;
+  errors : Core_error.ErrorSet.t ref;
 }
 
 (*****************************************************************************)
@@ -69,25 +77,25 @@ type env = {
 
 (* Report errors during evaluation to the user rather than just logging them
  * as we did before. *)
-let error env msg =
+let error (env : env) msg =
   (* We are not supposed to report errors in the config file for several reasons
    * (one being that it's often a temporary file anyways), so we report them on
    * the target file. *)
-  let loc = Tok.first_loc_of_file !!(env.xtarget.Xtarget.file) in
+  let loc = Tok.first_loc_of_file env.xtarget.path.internal_path_to_content in
   (* TODO: warning or error? MatchingError or ... ? *)
-  let err =
-    E.mk_error ~rule_id:(Some (fst env.rule.Rule.id)) loc msg Out.MatchingError
-  in
-  env.errors := Report.ErrorSet.add err !(env.errors)
+  let err = E.mk_error ~rule_id:(fst env.rule.id) ~msg ~loc Out.MatchingError in
+  env.errors := Core_error.ErrorSet.add err !(env.errors)
 
 (* this will be adjusted later in range_to_pattern_match_adjusted *)
 let fake_rule_id (id, str) =
   {
-    PM.id = Rule.ID.of_string (string_of_int id);
+    PM.id = Rule_ID.of_string_exn (string_of_int id);
     pattern_string = str;
     message = "";
+    metadata = None;
     fix = None;
-    languages = [];
+    fix_regexp = None;
+    langs = [];
   }
 
 let adjust_xconfig_with_rule_options xconf options =
@@ -96,7 +104,7 @@ let adjust_xconfig_with_rule_options xconf options =
 
 let default_xconfig =
   {
-    config = Rule_options.default_config;
+    config = Rule_options.default;
     equivs = [];
     nested_formula = false;
     matching_explanations = false;
@@ -104,5 +112,5 @@ let default_xconfig =
      * Anyway it's set to true in Runner_config.default so it will default to
      * true when running as part of the regular code path (not testing code)
      *)
-    filter_irrelevant_rules = false;
+    filter_irrelevant_rules = NoPrefiltering;
   }

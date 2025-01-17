@@ -1,4 +1,10 @@
-type range_kind = Plain | Inside | Regexp [@@deriving show]
+module Log = Log_engine.Log
+
+(*****************************************************************************)
+(* Types *)
+(*****************************************************************************)
+
+type range_kind = Plain | Inside | Anywhere | Regexp [@@deriving show]
 
 (* range with metavars *)
 type t = {
@@ -16,7 +22,7 @@ type t = {
    * to keep around the Inside. 'And' would be commutative again!
    *)
   kind : range_kind;
-  origin : Pattern_match.t;
+  origin : Core_match.t;
 }
 [@@deriving show]
 
@@ -27,44 +33,56 @@ type ranges = t list [@@deriving show]
 (* Convertors *)
 (*****************************************************************************)
 
-let (match_result_to_range : Pattern_match.t -> t) =
- fun m ->
-  let { Pattern_match.range_loc = start_loc, end_loc; env = mvars; _ } = m in
+let match_result_to_range (m : Core_match.t) : t =
+  let Core_match.{ range_loc = start_loc, end_loc; env = mvars; _ } = m in
   let r = Range.range_of_token_locations start_loc end_loc in
   { r; mvars; origin = m; kind = Plain }
 
-let (range_to_pattern_match_adjusted : Rule.t -> t -> Pattern_match.t) =
- fun r range ->
+let range_to_pattern_match_adjusted (r : Rule.t) (range : t) : Core_match.t =
   let m = range.origin in
   let rule_id = m.rule_id in
-  let languages = Xlang.to_langs r.Rule.languages.target_analyzer in
+  let langs = Analyzer.to_langs r.target_analyzer in
   (* adjust the rule id *)
-  let rule_id : Pattern_match.rule_id =
+  let rule_id : Core_match.rule_id =
     {
       rule_id with
-      id = fst r.Rule.id;
-      fix = r.Rule.fix;
-      languages;
-      message =
-        r.Rule.message (* keep pattern_str which can be useful to debug *);
+      id = fst r.id;
+      fix = r.fix;
+      langs;
+      message = r.message (* keep pattern_str which can be useful to debug *);
+      metadata = r.metadata;
     }
   in
   (* Need env to be the result of evaluate_formula, which propagates metavariables *)
   (* rather than the original metavariables for the match                          *)
-  { m with rule_id; env = range.mvars }
+  (* We wipe the `ast_node` fields here, because they are only needed for when are producing
+      metavariable bindings using `as`.
+      To keep them would persist the pointers to the AST, potentially prolonging its
+      lifetime and increasing memory pressure.
+  *)
+  { m with rule_id; env = range.mvars; ast_node = None }
 
 (*****************************************************************************)
 (* Set operations *)
 (*****************************************************************************)
 
-let logger = Logging.get_logger [ __MODULE__ ]
-
 let included_in config rv1 rv2 =
-  Range.( $<=$ ) rv1.r rv2.r
+  (Range.( $<=$ ) rv1.r rv2.r || rv2.kind = Anywhere)
   && rv1.mvars
      |> List.for_all (fun (mvar, mval1) ->
             match List.assoc_opt mvar rv2.mvars with
             | None -> true
+            (* Numeric capture group metavariables (of the form $1, $2, etc) may
+               be introduced implicitly via regular expressions that have
+               capture groups in them. The unification of these metavariables
+               can be dangerous, as it will prevent matches, when users may not
+               even know these metavariables exist. To be safe, let's assume
+               they always unify.
+
+               note: this does not affect named capture group metavariables
+               from <?xxx>, which will still be unified as normal
+            *)
+            | _ when Mvar.is_metavar_for_capture_group mvar -> true
             | Some mval2 ->
                 Matching_generic.equal_ast_bound_code config mval1 mval2)
 
@@ -91,33 +109,33 @@ let inside_compatible x y =
  *
  * alt: we could force the user to first And the metavariable-regex
  * with the pattern-inside, to have the right scope.
- * See https://github.com/returntocorp/semgrep/issues/2664
+ * See https://github.com/semgrep/semgrep/issues/2664
  * alt: we could do the rewriting ourselves, detecting that the
  * metavariable-regex has the wrong scope.
+ *
+ * TODO: remove ~debug_matches, just use SEMGREP_LOG_SRCS=engine
  *)
-let intersect_ranges config debug_matches xs ys =
-  let left_merge r1 r2 =
-    (* [r1] extended with [r2.mvars], assumes [included_in config r1 r2] *)
-    let r2_only_mvars =
-      r2.mvars
-      |> List.filter (fun (mvar, _) -> not (List.mem_assoc mvar r1.mvars))
-    in
-    { r1 with mvars = r2_only_mvars @ r1.mvars }
+let intersect_ranges config ~debug_matches xs ys =
+  let left_merge u v =
+    if included_in config u v && inside_compatible u v then
+      (* [u] extended with [v.mvars], assumes [included_in config u v] *)
+      let v_only_mvars =
+        v.mvars
+        |> List.filter (fun (mvar, _) -> not (List.mem_assoc mvar u.mvars))
+      in
+      Some { u with mvars = v_only_mvars @ u.mvars }
+    else None
   in
-  let left_included_merge us vs =
-    us
-    |> Common2.map_flatten (fun u ->
-           vs
-           |> Common.map_filter (fun v ->
-                  if included_in config u v && inside_compatible u v then
-                    Some (left_merge u v)
-                  else None))
+  let merge p us vs =
+    us |> Common2.map_flatten (fun u -> vs |> List_.filter_map (fun v -> p u v))
   in
   if debug_matches then
-    logger#info "intersect_range:\n\t%s\nvs\n\t%s" (show_ranges xs)
-      (show_ranges ys);
-  left_included_merge xs ys @ left_included_merge ys xs
-  [@@profiling]
+    Log.debug (fun m ->
+        m "intersect_range:\n\t%s\nvs\n\t%s" (show_ranges xs) (show_ranges ys));
+  merge left_merge xs ys
+  (* TODO: just call merge once? *)
+  @ merge (Fun.flip left_merge) xs ys
+[@@profiling]
 
 let difference_ranges config pos neg =
   let surviving_pos =
@@ -136,8 +154,9 @@ let difference_ranges config pos neg =
                     (* pattern-not-regex: x and y exclude each other *)
                     | Regexp -> included_in config x y || included_in config y x
                     (* pattern-not: we require the ranges to be equal *)
-                    | Plain -> included_in config x y && included_in config y x)
-             ))
+                    | Plain -> included_in config x y && included_in config y x
+                    (* not: { anywhere: y } -- y cannot occur *)
+                    | Anywhere -> true)))
   in
   surviving_pos
-  [@@profiling]
+[@@profiling]

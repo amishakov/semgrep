@@ -6,6 +6,8 @@
 *)
 
 open Common
+open Fpath_.Operators
+open Either_
 module AST = Ast_js
 module H = Parse_tree_sitter_helpers
 module G = AST_generic
@@ -33,7 +35,7 @@ let token = H.token
 let str = H.str
 let fake = Tok.unsafe_fake_tok ""
 let fb = Tok.unsafe_fake_bracket
-let mk_functype (params, rett) = TyFun (params, rett)
+let mk_functype ((_, params, _), rett) = TyFun (params, rett)
 
 (* Note that this file also raises some Impossible and Ast_builder_error *)
 let _todo _env _x = failwith "internal error: not implemented"
@@ -43,7 +45,7 @@ let _todo _env _x = failwith "internal error: not implemented"
    pattern because function parameters make this distinction.
    This conversion is intended to create a sub-pattern.
 *)
-let sub_pattern (id_or_pat : (a_ident, a_pattern) either) : a_pattern =
+let sub_pattern (id_or_pat : (a_ident, a_pattern) Either.t) : a_pattern =
   match id_or_pat with
   | Left id -> Id id
   | Right pat -> pat
@@ -92,7 +94,7 @@ let map_sep_list (env : env) (head : 'a) (tail : (_ * 'a) list)
     (f : env -> 'a -> 'b) : 'b list =
   let head = f env head in
   let tail =
-    Common.map (fun ((_sep : Tree_sitter_run.Token.t), elt) -> f env elt) tail
+    List_.map (fun ((_sep : Tree_sitter_run.Token.t), elt) -> f env elt) tail
   in
   head :: tail
 
@@ -146,7 +148,7 @@ let string_ (env : env) (x : CST.string_) : string wrap =
   | `DQUOT_rep_choice_unes_double_str_frag_DQUOT (v1, v2, v3) ->
       let open_ = token env v1 (* "\"" *) in
       let contents =
-        Common.map
+        List_.map
           (fun x ->
             match x with
             | `Unes_double_str_frag tok ->
@@ -155,13 +157,13 @@ let string_ (env : env) (x : CST.string_) : string wrap =
           v2
       in
       let close = token env v3 (* "\"" *) in
-      let str = contents |> Common.map fst |> String.concat "" in
-      let toks = (contents |> Common.map snd) @ [ close ] in
+      let str = contents |> List_.map fst |> String.concat "" in
+      let toks = (contents |> List_.map snd) @ [ close ] in
       (str, Tok.combine_toks open_ toks)
   | `SQUOT_rep_choice_unes_single_str_frag_SQUOT (v1, v2, v3) ->
       let open_ = token env v1 (* "'" *) in
       let v2 =
-        Common.map
+        List_.map
           (fun x ->
             match x with
             | `Unes_single_str_frag tok -> str env tok (* pattern "[^'\\\\]+" *)
@@ -170,8 +172,8 @@ let string_ (env : env) (x : CST.string_) : string wrap =
           v2
       in
       let close = token env v3 (* "'" *) in
-      let str = v2 |> Common.map fst |> String.concat "" in
-      let toks = (v2 |> Common.map snd) @ [ close ] in
+      let str = v2 |> List_.map fst |> String.concat "" in
+      let toks = (v2 |> List_.map snd) @ [ close ] in
       (str, Tok.combine_toks open_ toks)
 
 let namespace_import (env : env) ((v1, v2, v3) : CST.namespace_import_export) =
@@ -217,13 +219,13 @@ let jsx_element_name (env : env) (x : CST.jsx_element_name) : a_ident =
   | `Choice_jsx_id x -> jsx_identifier_ env x
   | `Nested_id x ->
       let xs = nested_identifier env x in
-      let str = xs |> Common.map fst |> String.concat "." in
+      let str = xs |> List_.map fst |> String.concat "." in
       let hd, tl =
         match xs with
         | [] -> raise Impossible
         | x :: xs -> (x, xs)
       in
-      (str, Tok.combine_toks (snd hd) (tl |> Common.map snd))
+      (str, Tok.combine_toks (snd hd) (tl |> List_.map snd))
   | `Jsx_name_name x ->
       let id1, id2 = jsx_namespace_name env x in
       let str = fst id1 ^ ":" ^ fst id2 in
@@ -360,8 +362,8 @@ let import_export_specifier (env : env)
       Some (expr_id, opt_as_id)
 
 let concat_nested_identifier (idents : a_ident list) : a_ident =
-  let str = idents |> Common.map fst |> String.concat "." in
-  let tokens = Common.map snd idents in
+  let str = idents |> List_.map fst |> String.concat "." in
+  let tokens = List_.map snd idents in
   let x, xs =
     match tokens with
     | [] -> assert false
@@ -427,7 +429,7 @@ let import_export_specifiers (env : env)
       CST.anon_import_export_spec_rep_COMMA_import_export_spec_3a1421d) :
     (a_ident * a_ident option) list =
   map_sep_list env v1 v2 import_export_specifier
-  |> List.filter_map (fun opt -> opt)
+  |> List_.filter_map (fun opt -> opt)
 
 let export_clause (env : env) ((v1, v2, v3, v4) : CST.export_clause) =
   let _open = token env v1 (* "{" *) in
@@ -539,7 +541,7 @@ and jsx_opening_element (env : env) ((v1, v2, v3, v4) : CST.jsx_opening_element)
         in
         id
   in
-  let v3 = Common.map (jsx_attribute_ env) v3 in
+  let v3 = List_.map (jsx_attribute_ env) v3 in
   let v4 = token env v4 (* ">" *) in
   (v1, v2, v3, v4)
 
@@ -559,7 +561,7 @@ and jsx_self_clos_elem (env : env)
         in
         id
   in
-  let v3 = Common.map (jsx_attribute_ env) v3 in
+  let v3 = List_.map (jsx_attribute_ env) v3 in
   let v4 = token env v4 (* "/" *) in
   let v5 = token env v5 (* ">" *) in
   let t2 = Tok.combine_toks v4 [ v5 ] in
@@ -569,7 +571,7 @@ and jsx_fragment (env : env) ((v1, v2, v3, v4, v5, v6) : CST.jsx_fragment) : xml
     =
   let v1 = token env v1 (* "<" *) in
   let v2 = token env v2 (* ">" *) in
-  let v3 = Common.map (jsx_child env) v3 in
+  let v3 = List_.map (jsx_child env) v3 in
   let v4 = token env v4 (* "<" *) in
   let v5 = token env v5 (* "/" *) in
   let v6 = token env v6 (* ">" *) in
@@ -659,7 +661,7 @@ and jsx_element_ (env : env) (x : CST.jsx_element_) : xml =
   match x with
   | `Jsx_elem (v1, v2, v3) ->
       let t0, tag, attrs, closing = jsx_opening_element env v1 in
-      let v2 = Common.map (jsx_child env) v2 in
+      let v2 = List_.map (jsx_child env) v2 in
       let v3 = jsx_closing_element env v3 in
       {
         xml_kind = XmlClassic (t0, tag, closing, snd v3);
@@ -674,7 +676,7 @@ and jsx_element_ (env : env) (x : CST.jsx_element_) : xml =
         xml_body = [];
       }
 
-and pattern (env : env) (x : CST.pattern) : (a_ident, a_pattern) either =
+and pattern (env : env) (x : CST.pattern) : (a_ident, a_pattern) Either.t =
   match x with
   | `Choice_choice_member_exp e -> (
       let lhs = lhs_expression env e in
@@ -742,7 +744,7 @@ and destructuring_pattern (env : env) (x : CST.destructuring_pattern) :
                 match x with
                 | Some x -> [ object_property_pattern env x ]
                 | None -> [])
-            |> List.flatten
+            |> List_.flatten
         | None -> []
       in
       let v3 = token env v3 (* "}" *) in
@@ -756,7 +758,7 @@ and destructuring_pattern (env : env) (x : CST.destructuring_pattern) :
                 match x with
                 | Some x -> [ pat_or_assign_pat env x |> sub_pattern ]
                 | None -> [])
-            |> List.flatten
+            |> List_.flatten
         | None -> []
       in
       let close = token env v3 (* "]" *) in
@@ -1055,8 +1057,8 @@ and class_body (env : env) ((v1, v2, v3) : CST.class_body) :
               match v1 with
               | `Abst_meth_sign x ->
                   (* TODO: types *)
-                  let _v = abstract_method_signature env x in
-                  None
+                  let v = abstract_method_signature env x in
+                  Some (Field v)
               | `Index_sign x ->
                   let _t = index_signature env x in
                   None
@@ -1218,7 +1220,7 @@ and primary_expression (env : env) (x : CST.primary_expression) : expr =
                 match v2 with
                 | `Choice_choice_decl x ->
                     let id = id_or_reserved_id env x in
-                    ([ ParamClassic (mk_param id) ], None)
+                    (fb [ ParamClassic (mk_param id) ], None)
                 | `Call_sign x ->
                     let _tparams, (params, tret) = call_signature env x in
                     (params, tret)
@@ -1257,7 +1259,7 @@ and primary_expression (env : env) (x : CST.primary_expression) : expr =
               in
               let _tparams, (v5, tret) = call_signature env v5 in
               let v6 = statement_block env v6 in
-              let attrs = v1 @ v3 |> Common.map attr in
+              let attrs = v1 @ v3 |> List_.map attr in
               let f_kind = (G.LambdaKind, v2) in
               let f =
                 {
@@ -1270,7 +1272,7 @@ and primary_expression (env : env) (x : CST.primary_expression) : expr =
               in
               Fun (f, v4)
           | `Class (v1, v2, v3, v4, v5, v6) ->
-              let v1 = Common.map (decorator env) v1 in
+              let v1 = List_.map (decorator env) v1 in
               let v2 = token env v2 (* "class" *) in
               let v3 =
                 match v3 with
@@ -1427,7 +1429,7 @@ and object_type (env : env) ((v1, v2, v3) : CST.object_type) =
         in
         let v2 = anon_choice_export_stmt_f90d83f env v2 in
         let v3 =
-          Common.map
+          List_.map
             (fun (v1, v2) ->
               let _v1 = anon_choice_COMMA_5194cb4 env v1 in
               let v2 = anon_choice_export_stmt_f90d83f env v2 in
@@ -1454,7 +1456,7 @@ and template_string (env : env) ((v1, v2, v3) : CST.template_string) :
     expr list bracket =
   let v1 = token env v1 (* "`" *) in
   let v2 =
-    Common.map
+    List_.map
       (fun x ->
         match x with
         | `Temp_chars tok -> L (String (str env tok)) (* template_chars *)
@@ -1476,7 +1478,7 @@ and map_template_literal_type (env : env)
     ((v1, v2, v3) : CST.template_literal_type) : type_ =
   let lback = (* "`" *) token env v1 in
   let xs =
-    Common.map
+    List_.map
       (fun x ->
         match x with
         | `Temp_chars tok ->
@@ -1487,7 +1489,7 @@ and map_template_literal_type (env : env)
       v2
   in
   let _rback = (* "`" *) token env v3 in
-  TypeTodo (("TemplateLitType", lback), xs |> Common.map (fun x -> Type x))
+  TypeTodo (("TemplateLitType", lback), xs |> List_.map (fun x -> Type x))
 
 and map_template_type (env : env) ((v1, v2, v3) : CST.template_type) :
     type_ bracket =
@@ -1598,7 +1600,7 @@ and expression (env : env) (x : CST.expression) : expr =
           let fun_ =
             {
               f_attrs = [];
-              f_params = [];
+              f_params = fb [];
               f_body = body;
               f_rettype = None;
               f_kind = (G.Function, fake);
@@ -1763,7 +1765,7 @@ and primary_type (env : env) (x : CST.primary_type) : type_ =
       let t1, xs, t2 = object_type env x in
       let xs =
         xs
-        |> Common.map_filter (function
+        |> List_.filter_map (function
              (* TODO *)
              | Left prop -> Some prop
              | Right _sts -> None)
@@ -1957,7 +1959,7 @@ and unary_expression (env : env) ((v1, v2) : CST.unary_expression) =
       Apply (IdSpecial (Delete, v1), fb [ v2 ])
 
 and pat_or_assign_pat (env : env) (x : CST.anon_choice_pat_3297d92) :
-    (a_ident, a_pattern) either =
+    (a_ident, a_pattern) Either.t =
   match x with
   | `Pat x -> pattern env x
   | `Assign_pat (v1, v2, v3) ->
@@ -1967,56 +1969,60 @@ and pat_or_assign_pat (env : env) (x : CST.anon_choice_pat_3297d92) :
       pat
 
 and formal_parameter (env : env) (x : CST.formal_parameter) : parameter =
-  let id_or_pat, opt_type, opt_default =
-    match x with
-    | `Requ_param (v1, v2, v3) ->
-        (* required_parameter *)
-        let id_or_pat = parameter_name env v1 in
-        let type_ =
-          match v2 with
-          | Some x -> Some (type_annotation env x |> snd)
-          | None -> None
+  let parameter_of_id_or_pat id_or_pat opt_type opt_default =
+    match id_or_pat with
+    | Left (id, attrs) ->
+        ParamClassic
+          {
+            p_name = id;
+            p_default = opt_default;
+            p_dots = None;
+            p_type = opt_type;
+            p_attrs = attrs;
+          }
+    | Right pat ->
+        let pat =
+          match opt_type with
+          | None -> pat
+          | Some type_ -> Cast (pat, Tok.unsafe_fake_tok ":", type_)
         in
-        let default = initializer_opt env v3 in
-        (id_or_pat, type_, default)
-    | `Opt_param (v1, v2, v3, v4) ->
-        (* optional_parameter *)
-        let id_or_pat = parameter_name env v1 in
-        let _questionmark_TODO = token env v2 (* "?" *) in
-        let opt_type =
-          match v3 with
-          | Some x -> Some (type_annotation env x |> snd)
-          | None -> None
+        let pat =
+          match opt_default with
+          | None -> pat
+          | Some expr -> Assign (pat, Tok.unsafe_fake_tok "=", expr)
         in
-        let opt_default = initializer_opt env v4 in
-        (id_or_pat, opt_type, opt_default)
+        ParamPattern pat
   in
-  match id_or_pat with
-  | Left id ->
-      ParamClassic
-        {
-          p_name = id;
-          p_default = opt_default;
-          p_dots = None;
-          p_type = opt_type;
-          p_attrs = [];
-        }
-  | Right pat ->
-      let pat =
-        match opt_type with
-        | None -> pat
-        | Some type_ -> Cast (pat, Tok.unsafe_fake_tok ":", type_)
+
+  match x with
+  | `Requ_param (v1, v2, v3) ->
+      (* required_parameter *)
+      let id_or_pat = parameter_name env v1 in
+      let type_ =
+        match v2 with
+        | Some x -> Some (type_annotation env x |> snd)
+        | None -> None
       in
-      let pat =
-        match opt_default with
-        | None -> pat
-        | Some expr -> Assign (pat, Tok.unsafe_fake_tok "=", expr)
+      let default = initializer_opt env v3 in
+      parameter_of_id_or_pat id_or_pat type_ default
+  | `Opt_param (v1, v2, v3, v4) ->
+      (* optional_parameter *)
+      let id_or_pat = parameter_name env v1 in
+      let _questionmark_TODO = token env v2 (* "?" *) in
+      let opt_type =
+        match v3 with
+        | Some x -> Some (type_annotation env x |> snd)
+        | None -> None
       in
-      ParamPattern pat
+      let opt_default = initializer_opt env v4 in
+      parameter_of_id_or_pat id_or_pat opt_type opt_default
+  | `Semg_ellips v1 ->
+      let tok = token env v1 in
+      ParamEllipsis tok
 
 and formal_parameters (env : env) ((v1, v2, v3) : CST.formal_parameters) :
-    parameter list =
-  let _open = token env v1 (* "(" *) in
+    parameter list bracket =
+  let open_ = token env v1 (* "(" *) in
   let params =
     match v2 with
     | Some (v1, v2, v3) ->
@@ -2025,8 +2031,8 @@ and formal_parameters (env : env) ((v1, v2, v3) : CST.formal_parameters) :
         params
     | None -> []
   in
-  let _close = token env v3 (* ")" *) in
-  params
+  let close = token env v3 (* ")" *) in
+  (open_, params, close)
 
 (* class Component<Props = any, State = any> { ... *)
 and default_type (env : env) ((v1, v2) : CST.default_type) =
@@ -2037,7 +2043,7 @@ and default_type (env : env) ((v1, v2) : CST.default_type) =
 and switch_body (env : env) ((v1, v2, v3) : CST.switch_body) =
   let _v1 = token env v1 (* "{" *) in
   let v2 =
-    Common.map
+    List_.map
       (fun x ->
         match x with
         | `Switch_case x -> switch_case env x
@@ -2089,7 +2095,7 @@ and statement (env : env) (x : CST.statement) : stmt list =
             [ ImportFile (import_tok, file) ]
       in
       let _v4 = semicolon env v4 in
-      v3 |> Common.map (fun m -> M m)
+      v3 |> List_.map (fun m -> M m)
   | `Debu_stmt (v1, v2) ->
       let v1 = identifier env v1 (* "debugger" *) in
       let v2 = semicolon env v2 in
@@ -2099,7 +2105,7 @@ and statement (env : env) (x : CST.statement) : stmt list =
       [ ExprStmt (e, t) ]
   | `Decl x ->
       let vars = declaration env x in
-      vars |> Common.map (fun x -> DefStmt x)
+      vars |> List_.map (fun x -> DefStmt x)
   | `Stmt_blk x -> [ statement_block env x ]
   | `If_stmt (v1, v2, v3, v4) ->
       let v1 = token env v1 (* "if" *) in
@@ -2256,7 +2262,7 @@ and method_definition (env : env)
   in
   let _tparams, (v8, tret) = call_signature env v8 in
   let v9 = statement_block env v9 in
-  let attrs = v1 @ v2 @ v2bis @ v3 @ v4 @ v5 @ v7 |> Common.map attr in
+  let attrs = v1 @ v2 @ v2bis @ v3 @ v4 @ v5 @ v7 |> List_.map attr in
   let f_kind = (G.Method, fake) in
   let f =
     { f_attrs = []; f_params = v8; f_body = v9; f_rettype = tret; f_kind }
@@ -2267,7 +2273,7 @@ and method_definition (env : env)
 
 and class_declaration (env : env)
     ((v1, v2, v3, v4, v5, v6, v7) : CST.class_declaration) : definition =
-  let v1 = Common.map (decorator env) v1 in
+  let v1 = List_.map (decorator env) v1 in
   let v2 = token env v2 (* "class" *) in
   let v3 = identifier env v3 (* identifier *) in
   (* TODO types: type_parameters *)
@@ -2356,7 +2362,7 @@ and export_statement (env : env) (x : CST.export_statement) : stmt list =
           in
           v2
       | `Rep_deco_export_choice_decl (v1, v2, v3) ->
-          let decorators = Common.map (decorator env) v1 in
+          let decorators = List_.map (decorator env) v1 in
           let export_tok = token env v2 (* "export" *) in
           let v3 =
             match v3 with
@@ -2394,8 +2400,8 @@ and export_statement (env : env) (x : CST.export_statement) : stmt list =
                          -->
 
                            const foo = bar
-                           const !default! = foo
-                           export !default!
+                           const default = foo
+                           export default
                       *)
                            [
                              DefStmt def;
@@ -2441,7 +2447,7 @@ and type_annotation (env : env) ((v1, v2) : CST.type_annotation) =
 
 and anon_rep_COMMA_opt_choice_exp_ca698a5 (env : env)
     (xs : CST.anon_rep_COMMA_opt_choice_exp_ca698a5) =
-  List.filter_map
+  List_.filter_map
     (fun (v1, v2) ->
       let _v1 = token env v1 (* "," *) in
       let v2 =
@@ -2491,7 +2497,7 @@ and anon_choice_export_stmt_f90d83f (env : env)
         | Some x -> Some (type_annotation env x |> snd)
         | None -> None
       in
-      let attrs = v1 @ v2 @ v2bis @ v3 @ v5 |> Common.map attr in
+      let attrs = v1 @ v2 @ v2bis @ v3 @ v5 |> List_.map attr in
       let fld =
         { fld_name = v4; fld_attrs = attrs; fld_type = v6; fld_body = None }
       in
@@ -2520,7 +2526,7 @@ and anon_choice_export_stmt_f90d83f (env : env)
       in
       let ty = mk_functype (v3, v4) in
       let fld_name = PN ("new", v1) in
-      let fld_attrs = v0 |> Common.map attr in
+      let fld_attrs = v0 |> List_.map attr in
       let fld = { fld_name; fld_attrs; fld_type = Some ty; fld_body = None } in
       Left (Field fld)
   | `Index_sign x ->
@@ -2566,7 +2572,7 @@ and public_field_definition (env : env)
     | None -> None
   in
   let opt_init = initializer_opt env v7 in
-  let attrs = attributes |> Common.map attr in
+  let attrs = attributes |> List_.map attr in
   Field
     {
       fld_name = prop_name;
@@ -2596,7 +2602,7 @@ and map_extends_clause (env : env) ((v1, v2, v3, v4) : CST.extends_clause) :
     | None -> []
   in
   let v4 =
-    Common.map
+    List_.map
       (fun (v1, v2, v3) ->
         let _v1 = (* "," *) token env v1 in
         let v2 = expression env v2 in
@@ -2694,7 +2700,7 @@ and abstract_method_signature (env : env)
     | Some tok -> [ (Optional, token env tok) ] (* "?" *)
     | None -> []
   in
-  let attrs = v1 @ v2 @ v3 @ v5 |> Common.map attr in
+  let attrs = v1 @ v2 @ v3 @ v5 |> List_.map attr in
   let _tparams, x = call_signature env v6 in
   let t = mk_functype x in
   { fld_name = v4; fld_attrs = attrs; fld_type = Some t; fld_body = None }
@@ -2733,7 +2739,7 @@ and map_asserts (env : env) ((v1, v2, v3) : CST.asserts) : type_ =
   TypeTodo (("Asserts", tcolon), [ any ])
 
 and call_signature (env : env) ((v1, v2, v3) : CST.call_signature) :
-    a_type_parameter list * (parameter list * type_ option) =
+    a_type_parameter list * (parameter list bracket * type_ option) =
   let v1 =
     match v1 with
     | Some x -> type_parameters env x
@@ -2765,7 +2771,7 @@ and object_ (env : env) ((v1, v2, v3) : CST.object_) : a_obj =
             match x with
             | Some x -> [ object_property env x ]
             | None -> [])
-        |> List.flatten
+        |> List_.flatten
     | None -> []
   in
   let v3 = token env v3 (* "}" *) in
@@ -2849,11 +2855,20 @@ and constraint_ (env : env) ((v1, v2) : CST.constraint_) :
   v2
 
 and parameter_name (env : env) ((v1, v2, v2bis, v3, v4) : CST.parameter_name) :
-    (a_ident, a_pattern) Common.either =
-  let _decorators = Common.map (decorator env) v1 in
-  let _accessibility = accessibility_modifier_opt_to_list env v2 in
-  let _override = kwd_attr_opt_to_list env Override v2bis in
-  let _readonly = kwd_attr_opt_to_list env Readonly v3 in
+    (a_ident * attribute list, a_pattern) Either.t =
+  let decorators = List_.map (decorator env) v1 in
+  let accessibility =
+    accessibility_modifier_opt_to_list env v2
+    |> List_.map (fun attr -> KeywordAttr attr)
+  in
+  let override =
+    kwd_attr_opt_to_list env Override v2bis
+    |> List_.map (fun attr -> KeywordAttr attr)
+  in
+  let readonly =
+    kwd_attr_opt_to_list env Readonly v3
+    |> List_.map (fun attr -> KeywordAttr attr)
+  in
   let id_or_pat =
     match v4 with
     | `Pat x -> pattern env x
@@ -2863,6 +2878,8 @@ and parameter_name (env : env) ((v1, v2, v2bis, v3, v4) : CST.parameter_name) :
         Left id
   in
   id_or_pat
+  |> Either.map_left (fun id ->
+         (id, decorators @ accessibility @ override @ readonly))
 
 and lhs_expression (env : env) (x : CST.lhs_expression) : expr =
   match x with
@@ -2901,17 +2918,17 @@ and function_declaration (env : env)
   (basic_entity v3, FuncDef f)
 
 and anon_choice_type_id_940079a (env : env)
-    (x : CST.anon_choice_type_id_940079a) : (a_ident, a_pattern) either =
+    (x : CST.anon_choice_type_id_940079a) : (a_ident, a_pattern) Either.t =
   match x with
   | `Id tok -> Left (identifier env tok) (* identifier *)
   | `Dest_pat x -> Right (destructuring_pattern env x)
 
-and id_or_destructuring_pattern env x : (a_ident, a_pattern) either =
+and id_or_destructuring_pattern env x : (a_ident, a_pattern) Either.t =
   anon_choice_type_id_940079a env x
 
 (* TODO: change type signature, return just a_pattern *)
 and rest_pattern (env : env) ((v1, v2) : CST.rest_pattern) :
-    tok * (a_ident, a_pattern) either =
+    tok * (a_ident, a_pattern) Either.t =
   let dots = token env v1 (* "..." *) in
   let e = lhs_expression env v2 in
   (dots, Right e)
@@ -2960,7 +2977,7 @@ and method_signature (env : env)
   in
   let v6 = property_name env v6 in
   let v7 = kwd_attr_opt_to_list env Optional v7 in
-  let attrs = v1 @ v2 @ v2bis @ v3 @ v4 @ v5 @ v7 |> Common.map attr in
+  let attrs = v1 @ v2 @ v2bis @ v3 @ v4 @ v5 @ v7 |> List_.map attr in
   let _tparams, x = call_signature env v8 in
   let t = mk_functype x in
   { fld_name = v6; fld_attrs = attrs; fld_type = Some t; fld_body = None }
@@ -2998,7 +3015,7 @@ and declaration (env : env) (x : CST.declaration) : definition list =
           VarDef { v_kind = (Const, v2); v_init = None; v_type = Some ty } );
       ]
   | `Abst_class_decl (v1, v2, v3, v4, v5, v6, v7) ->
-      let _v1_TODO = Common.map (decorator env) v1 in
+      let _v1_TODO = List_.map (decorator env) v1 in
       let v2 = attr (Abstract, token env v2) (* "abstract" *) in
       let v3 = token env v3 (* "class" *) in
       let v4 = identifier env v4 (* identifier *) in
@@ -3075,7 +3092,7 @@ and declaration (env : env) (x : CST.declaration) : definition list =
       let t1, xs, t2 = object_type env v5 in
       let xs =
         xs
-        |> Common.map_filter (function
+        |> List_.filter_map (function
              (* TODO *)
              | Left _fld -> None
              | Right _sts -> None)
@@ -3111,7 +3128,7 @@ and declaration (env : env) (x : CST.declaration) : definition list =
             let f =
               {
                 f_attrs = [];
-                f_params = [];
+                f_params = fb [];
                 f_body = v2;
                 f_rettype = None;
                 f_kind;
@@ -3152,7 +3169,7 @@ and map_extends_type_clause (env : env) ((v1, v2, v3) : CST.extends_type_clause)
   let _textends = (* "extends" *) token env v1 in
   let v2 = map_anon_choice_type_id_a85f573 env v2 in
   let v3 =
-    Common.map
+    List_.map
       (fun (v1, v2) ->
         let _v1 = (* "," *) token env v1 in
         let v2 = map_anon_choice_type_id_a85f573 env v2 in
@@ -3196,26 +3213,29 @@ let guess_dialect opt_dialect file : dialect =
       if file =~ ".*\\.tsx" then (* nosem *)
         `TSX else `Typescript
 
-type cst_result = CST.program Tree_sitter_run.Parsing_result.t
+type cst_result =
+  ( CST_tree_sitter_typescript.program,
+    CST_tree_sitter_typescript.extra )
+  Tree_sitter_run.Parsing_result.t
 
 let parse ?dialect file =
   let debug = false in
   H.wrap_parser
     (fun () ->
-      let dialect = guess_dialect dialect file in
+      let dialect = guess_dialect dialect !!file in
       match dialect with
       | `Typescript ->
-          let cst = Tree_sitter_typescript.Parse.file file in
+          let cst = Tree_sitter_typescript.Parse.file !!file in
           (cst :> cst_result)
       | `TSX ->
-          let cst = Tree_sitter_tsx.Parse.file file in
+          let cst = Tree_sitter_tsx.Parse.file !!file in
           (cst :> cst_result))
-    (fun cst ->
+    (fun cst _extras ->
       let env = { H.file; conv = H.line_col_to_pos file; extra = () } in
 
       if debug then (
         Printexc.record_backtrace true;
-        CST.dump_tree cst);
+        Boilerplate_tree_sitter_typescript.dump_tree cst);
 
       match program env cst with
       | Program p -> p
@@ -3226,9 +3246,9 @@ let parse_pattern str =
     (* TODO Should we use Tree_sitter_tsx so that we permit TSX constructs in
      * patterns? Or try both, since TSX is not strictly a superset? *)
       (fun () -> (Tree_sitter_typescript.Parse.string str :> cst_result))
-    (fun cst ->
-      let file = "<pattern>" in
-      let env = { H.file; conv = Hashtbl.create 0; extra = () } in
+    (fun cst _extras ->
+      let file = Fpath.v "<pattern>" in
+      let env = { H.file; conv = H.line_col_to_pos_pattern str; extra = () } in
       match program env cst with
       | Program ss -> Stmts ss
       | other -> other)

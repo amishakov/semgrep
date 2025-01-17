@@ -3,8 +3,9 @@
  (public_name ojsonnet)
  (wrapped false)
  (libraries
+   logs
    commons
    parser_jsonnet.tree_sitter
  )
- (preprocess (pps ppx_profiling ppx_sexp_conv ppx_deriving.show))
+ (preprocess (pps ppx_profiling ppx_deriving.show))
 )

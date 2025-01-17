@@ -1,7 +1,7 @@
 {
 (* Yoann Padioleau
  *
- * Copyright (C) 2021 r2c
+ * Copyright (C) 2021 Semgrep Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
@@ -16,6 +16,7 @@
 open Common
 open Token_scala
 module Flag = Flag_parsing
+module Log = Log_parser_scala.Log
 
 (*****************************************************************************)
 (* Prelude *)
@@ -70,12 +71,12 @@ let rec current_mode () =
   match !_mode_stack with
   | top :: _ -> top
   | [] ->
-      pr2("mode_stack is empty, defaulting to INITIAL");
+      Log.warn (fun m-> m "mode_stack is empty, defaulting to INITIAL");
       reset();
       current_mode ()
 
-let push_mode mode = Common.push mode _mode_stack
-let pop_mode () = ignore(Common2.pop2 _mode_stack)
+let push_mode mode = Stack_.push mode _mode_stack
+let pop_mode () = ignore(Stack_.pop _mode_stack)
 
 }
 
@@ -438,7 +439,7 @@ rule token = parse
   (* ----------------------------------------------------------------------- *)
   (* literals *)
   | integerLiteral as n
-      { IntegerLiteral (int_of_string_opt n, tokinfo lexbuf) }
+      { IntegerLiteral (Parsed_int.parse (n, tokinfo lexbuf)) }
   | floatingPointLiteral as n
       { FloatingPointLiteral (float_of_string_opt n, tokinfo lexbuf) }
 

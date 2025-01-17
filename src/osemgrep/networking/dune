@@ -1,15 +1,23 @@
 ; This library should contain all the entry points to access the internet.
 (library
+  (public_name semgrep.osemgrep_networking)
   (name osemgrep_networking)
   (wrapped false)
   (libraries
     lwt
-    ; !!osemgrep_networking should be the only lib in semgrep using http-lwt-client!!
-    uri http-lwt-client
+    networking.http_mock_client
+    networking.http_helpers
+    lwt_platform
+    ocolor
+
+    commons
 
     profiling
+    networking
 
-    semgrep_core_cli ; for Version.version in Network_app.ml
+    semgrep.core
+    semgrep.parsing
+
     osemgrep_configuring
     osemgrep_jsonnet
   )
@@ -19,6 +27,7 @@
      ppx_deriving.show
      ppx_deriving.eq
      ppx_hash
+     lwt_ppx
    )
  )
 )

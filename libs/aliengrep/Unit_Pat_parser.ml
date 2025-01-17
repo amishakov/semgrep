@@ -2,9 +2,10 @@
 
 open Pat_AST
 
+let t = Testo.create
 let slconf = Conf.default_singleline_conf
 let mlconf = Conf.default_multiline_conf
-let ast = Alcotest.testable (Fmt.of_to_string Pat_AST.show) ( = )
+let ast = Alcotest.testable (Fmt_.of_show Pat_AST.show) ( = )
 
 let check conf pat expected_ast =
   let res = Pat_parser.from_string conf pat in
@@ -41,11 +42,12 @@ let test_long_ellipsis () =
 let test_multiline () = ()
 
 let tests =
-  [
-    ("literal_match", test_literal_match);
-    ("parentheses", test_parentheses);
-    ("metavariables", test_metavariables);
-    ("ellipsis", test_ellipsis);
-    ("long ellipsis", test_long_ellipsis);
-    ("multiline", test_multiline);
-  ]
+  Testo.categorize "pattern parsing"
+    [
+      t "literal_match" test_literal_match;
+      t "parentheses" test_parentheses;
+      t "metavariables" test_metavariables;
+      t "ellipsis" test_ellipsis;
+      t "long ellipsis" test_long_ellipsis;
+      t "multiline" test_multiline;
+    ]

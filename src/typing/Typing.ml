@@ -15,124 +15,143 @@
 
 open Common
 module G = AST_generic
+module H = AST_generic_helpers
+
+(* hook to allow pro-only type inference for expressions *)
+let pro_hook_type_of_expr :
+    (Lang.t -> G.expr -> G.name Type.t option) option ref =
+  ref None
 
 (* returns possibly the inferred type of the expression,
  * as well as an ident option that can then be used to query LSP to get the
  * type of the ident. *)
 let rec type_of_expr lang e : G.name Type.t * G.ident option =
-  match e.G.e with
-  | G.L lit ->
-      let t = type_of_lit lit in
-      (t, None)
-  | G.DotAccess
-      (_obj, _, FN (Id (("length", _), { id_type = { contents = None }; _ })))
-    when lang =*= Lang.Java ->
-      (* TODO: Move this to 'guess_type_of_dotaccess', but somehow we need to
-       * pass it additional info (e.g. the "expected type" as in bidirectional
-       * type checking) so that it can distinguish `length` as a method (e.g. `String`)
-       * and `length` as an attribute (arrays). The exact solution needs to be
-       * considered more carefully.
-       *
-       * NOTE that right now the use of `length` as a method is handled by
-       * 'guess_type_of_dotaccess' which is invoked by the 'typing_visitor'
-       * (see 'check_program'). *)
-      (Type.Builtin Type.Int, None)
-  | G.N name
-  | G.DotAccess (_, _, FN name) ->
-      type_of_name lang name
-  | G.Cast (t, _, _) -> (type_of_ast_generic_type lang t, None)
-  (* TODO? or generate a fake "new" id for LSP to query on tk? *)
-  (* We conflate the type of a class with the type of its instance. Maybe at
-   * some point we should introduce a `Class` type and unwrap it here upon
-   * instantiation. *)
-  | G.New (_tk, t, _ii, _) -> (type_of_ast_generic_type lang t, None)
-  (* Binary operator *)
-  | G.Call ({ e = IdSpecial (Op op, _); _ }, (_l, [ Arg e1; Arg e2 ], _r)) ->
-      let t1, _id = type_of_expr lang e1 in
-      let t2, _id = type_of_expr lang e2 in
-      let t =
-        match (t1, op, t2) with
-        | Type.(Builtin (Int | Float)), (G.Plus | G.Minus (* TODO more *)), _
-        | ( _,
-            (G.Plus | G.Minus | G.Mult (* TODO more *)),
-            Type.(Builtin (Int | Float)) )
-        (* Note that `+` is overloaded in many languages and may also be
-         * string concatenation, and unfortunately some languages such
-         * as Java and JS/TS have implicit coercions to string. *)
-          when lang =*= Lang.Python || lang =*= Lang.Php (* TODO more *) ->
-            Type.Builtin Type.Number
-        | ( Type.Builtin Type.Int,
-            (G.Plus | G.Minus (* TODO more *)),
-            Type.Builtin Type.Int ) ->
-            Type.Builtin Type.Int
-        | ( _,
-            ( G.Eq | G.PhysEq | G.NotEq | G.NotPhysEq | G.Lt | G.LtE | G.Gt
-            | G.GtE | G.In | G.NotIn | G.Is | G.NotIs | G.And ),
-            _ ) ->
-            Type.Builtin Type.Bool
-        | Type.Builtin Type.Bool, G.Or, _
-        | _, G.Or, Type.Builtin Type.Bool ->
-            Type.Builtin Type.Bool
-        | _, G.Or, _ when lang =*= Lang.Java ->
-            (* E.g. in Python you can write `x or ""` to mean `""` in case `x` is `None`.
-             * THINK: Is there a similar idiom involving `and`/`&&` ? *)
-            Type.Builtin Type.Bool
-        | Type.Builtin Type.Bool, (G.BitOr | G.BitAnd | G.BitXor), _
-        | _, (G.BitOr | G.BitAnd | G.BitXor), Type.Builtin Type.Bool
-          when lang =*= Lang.Java ->
-            (* If the operands to |, &, or ^ are boolean, in Java these are
-             * boolean operators. If we can resolve one operand to a boolean, we
-             * know that in a well-formed program, the other is also a boolean.
-             * *)
-            Type.Builtin Type.Bool
-        | _else_ -> Type.NoType
-      in
-      (t, None)
-  (* Unary operator *)
-  | G.Call ({ e = IdSpecial (Op op, _); _ }, (_l, [ Arg e ], _r)) ->
-      let t, _id = type_of_expr lang e in
-      let t =
-        match (op, t) with
-        | G.Not, _ -> Type.Builtin Type.Bool
-        | _else_ -> Type.NoType
-      in
-      (t, None)
-  | G.Call (e, _args) ->
-      (* If 'e' is of the form `o.f`, then 'check_program' should have filled in the
-       * 'id_type' of `f` using 'guess_type_of_dotaccess'. *)
-      let t, id = type_of_expr lang e in
-      let t =
-        match t with
-        (* less: in OCaml functions can be curried, so we need to match _params
-         * and _args to calculate the resulting type. *)
-        | Function (_params, ret) -> ret
-        | _else_ -> Type.NoType
-      in
-      (t, id)
-  | G.Conditional (_, e1, e2) ->
-      let t1, id1opt = type_of_expr lang e1 in
-      let t2, id2opt = type_of_expr lang e2 in
-      (* LATER: we could also not enforce to have a type for both branches,
-       * but let's go simple for now and enforce both branches have
-       * a type and that the types are equal.
-       *)
-      let t =
-        (* LATER: in theory we should look if the types are compatible,
-         * and take the lowest upper bound of the two types *)
-        let eq = Type.equal (AST_utils.with_structural_equal G.equal_name) in
-        if eq t1 t2 then t1 else Type.NoType
-      in
-      let idopt =
-        (* TODO? is there an Option.xxx or Common.xxx function for that? *)
-        match (id1opt, id2opt) with
-        | Some id1, _ -> Some id1
-        | _, Some id2 -> Some id2
-        | None, None -> None
-      in
-      (t, idopt)
-  | _else_ -> (Type.NoType, None)
+  let pro_type =
+    match !pro_hook_type_of_expr with
+    | None -> None
+    | Some f -> f lang e
+  in
+  match pro_type with
+  | Some ty -> (ty, None)
+  | None -> (
+      match e.G.e with
+      | G.L lit ->
+          let t = type_of_lit lang lit in
+          (t, None)
+      | G.DotAccess
+          ( _obj,
+            _,
+            FN (Id (("length", _), { id_type = { contents = None }; _ })) )
+        when lang =*= Lang.Java ->
+          (* TODO: Move this to 'guess_type_of_dotaccess', but somehow we need to
+           * pass it additional info (e.g. the "expected type" as in bidirectional
+           * type checking) so that it can distinguish `length` as a method (e.g. `String`)
+           * and `length` as an attribute (arrays). The exact solution needs to be
+           * considered more carefully.
+           *
+           * NOTE that right now the use of `length` as a method is handled by
+           * 'guess_type_of_dotaccess' which is invoked by the 'typing_visitor'
+           * (see 'check_program'). *)
+          (Type.Builtin Type.Int, None)
+      | G.N name
+      | G.DotAccess (_, _, FN name) ->
+          type_of_name lang name
+      | G.Cast (t, _, _) -> (type_of_ast_generic_type lang t, None)
+      (* TODO? or generate a fake "new" id for LSP to query on tk? *)
+      (* We conflate the type of a class with the type of its instance. Maybe at
+       * some point we should introduce a `Class` type and unwrap it here upon
+       * instantiation. *)
+      | G.New (_tk, t, _ii, _) -> (type_of_ast_generic_type lang t, None)
+      (* Binary operator *)
+      | G.Call ({ e = IdSpecial (Op op, _); _ }, (_l, [ Arg e1; Arg e2 ], _r))
+        ->
+          let t1, _id = type_of_expr lang e1 in
+          let t2, _id = type_of_expr lang e2 in
+          let t =
+            match (t1, op, t2) with
+            | ( Type.(Builtin (Int | Float)),
+                (G.Plus | G.Minus (* TODO more *)),
+                _ )
+            | ( _,
+                (G.Plus | G.Minus | G.Mult (* TODO more *)),
+                Type.(Builtin (Int | Float)) )
+            (* Note that `+` is overloaded in many languages and may also be
+             * string concatenation, and unfortunately some languages such
+             * as Java and JS/TS have implicit coercions to string. *)
+              when lang =*= Lang.Python || lang =*= Lang.Php (* TODO more *) ->
+                Type.Builtin Type.Number
+            | ( Type.Builtin Type.Int,
+                (G.Plus | G.Minus (* TODO more *)),
+                Type.Builtin Type.Int ) ->
+                Type.Builtin Type.Int
+            | ( _,
+                ( G.Eq | G.PhysEq | G.NotEq | G.NotPhysEq | G.Lt | G.LtE | G.Gt
+                | G.GtE | G.In | G.NotIn | G.Is | G.NotIs | G.And ),
+                _ ) ->
+                Type.Builtin Type.Bool
+            | Type.Builtin Type.Bool, G.Or, _
+            | _, G.Or, Type.Builtin Type.Bool ->
+                Type.Builtin Type.Bool
+            | _, G.Or, _ when lang =*= Lang.Java ->
+                (* E.g. in Python you can write `x or ""` to mean `""` in case `x` is `None`.
+                 * THINK: Is there a similar idiom involving `and`/`&&` ? *)
+                Type.Builtin Type.Bool
+            | Type.Builtin Type.Bool, (G.BitOr | G.BitAnd | G.BitXor), _
+            | _, (G.BitOr | G.BitAnd | G.BitXor), Type.Builtin Type.Bool
+              when lang =*= Lang.Java ->
+                (* If the operands to |, &, or ^ are boolean, in Java these are
+                 * boolean operators. If we can resolve one operand to a boolean, we
+                 * know that in a well-formed program, the other is also a boolean.
+                 * *)
+                Type.Builtin Type.Bool
+            | _else_ -> Type.NoType
+          in
+          (t, None)
+      (* Unary operator *)
+      | G.Call ({ e = IdSpecial (Op op, _); _ }, (_l, [ Arg e ], _r)) ->
+          let t, _id = type_of_expr lang e in
+          let t =
+            match (op, t) with
+            | G.Not, _ -> Type.Builtin Type.Bool
+            | _else_ -> Type.NoType
+          in
+          (t, None)
+      | G.Call (e, _args) ->
+          (* If 'e' is of the form `o.f`, then 'check_program' should have filled in the
+           * 'id_type' of `f` using 'guess_type_of_dotaccess'. *)
+          let t, id = type_of_expr lang e in
+          let t =
+            match t with
+            (* less: in OCaml functions can be curried, so we need to match _params
+             * and _args to calculate the resulting type. *)
+            | Function (_params, ret) -> ret
+            | _else_ -> Type.NoType
+          in
+          (t, id)
+      | G.Conditional (_, e1, e2) ->
+          let t1, id1opt = type_of_expr lang e1 in
+          let t2, id2opt = type_of_expr lang e2 in
+          (* LATER: we could also not enforce to have a type for both branches,
+           * but let's go simple for now and enforce both branches have
+           * a type and that the types are equal.
+           *)
+          let t =
+            (* LATER: in theory we should look if the types are compatible,
+             * and take the lowest upper bound of the two types *)
+            let eq = Type.equal G.equal_name in
+            if eq t1 t2 then t1 else Type.NoType
+          in
+          let idopt =
+            (* TODO? is there an Option.xxx or Common.xxx function for that? *)
+            match (id1opt, id2opt) with
+            | Some id1, _ -> Some id1
+            | _, Some id2 -> Some id2
+            | None, None -> None
+          in
+          (t, idopt)
+      | _else_ -> (Type.NoType, None))
 
-and type_of_lit = function
+and type_of_lit lang = function
   (* NB: We could infer Type.Number for JS int/float literals, but we can
      * handle that relationship in matching and we can be more precise for
      * now. One actual rule uses `float` for a typed metavariable in JS so
@@ -140,19 +159,19 @@ and type_of_lit = function
   | G.Int _ -> Type.Builtin Type.Int
   | G.Float _ -> Type.Builtin Type.Float
   | G.Bool _ -> Type.Builtin Type.Bool
+  | G.String (_, (_, t), _) when lang =*= Lang.Cpp ->
+      type_of_ast_generic_type lang
+        (G.TyPointer
+           ( t,
+             {
+               t = G.TyN (H.name_of_id ("char", t));
+               t_attrs = [ KeywordAttr (Const, t) ];
+             } )
+        |> G.t)
   | G.String _ -> Type.Builtin Type.String
   | _else_ -> Type.NoType
 
 and type_of_name lang = function
-  | Id (ident, { id_svalue = { contents = Some (Lit lit) }; _ }) ->
-      let t = type_of_lit lit in
-      (t, Some ident)
-  | Id (ident, { id_svalue = { contents = Some (Cst Cbool) }; _ }) ->
-      (Type.Builtin Type.Bool, Some ident)
-  | Id (ident, { id_svalue = { contents = Some (Cst Cint) }; _ }) ->
-      (Type.Builtin Type.Int, Some ident)
-  | Id (ident, { id_svalue = { contents = Some (Cst Cstr) }; _ }) ->
-      (Type.Builtin Type.String, Some ident)
   | Id (ident, id_info) ->
       let t = resolved_type_of_id_info lang id_info in
       let t =
@@ -176,10 +195,24 @@ and type_of_name lang = function
       (* TODO What to do with type arguments? *)
       (Type.NoType, None)
 
+and resolved_type_of_svalue lang = function
+  | Some (G.Lit lit) -> type_of_lit lang lit
+  | Some (Cst Cbool) -> Type.Builtin Type.Bool
+  | Some (Cst Cint) -> Type.Builtin Type.Int
+  | Some (Cst Cstr) -> Type.Builtin Type.String
+  | _else_ -> Type.NoType
+
 and resolved_type_of_id_info lang info : G.name Type.t =
-  match !(info.G.id_type) with
-  | Some t -> type_of_ast_generic_type lang t
-  | None -> Type.NoType
+  (* First look at the svalue to see if we can get the type of the actual value
+   * that this was initialized to, rather than the declared type. This can fail
+   * for a variety of reasons, so if we don't get a type from this, fall back to
+   * the resolved type. *)
+  let svalue_type = resolved_type_of_svalue lang !(info.G.id_svalue) in
+  if Type.is_real_type svalue_type then svalue_type
+  else
+    match !(info.G.id_type) with
+    | Some t -> type_of_ast_generic_type lang t
+    | None -> Type.NoType
 
 and type_of_ast_generic_type lang t : G.name Type.t =
   match t.G.t with
@@ -195,7 +228,7 @@ and type_of_ast_generic_type lang t : G.name Type.t =
   | G.TyApply ({ G.t = G.TyN name; _ }, (_l, args, _r)) ->
       let args =
         args
-        |> Common.map (function
+        |> List_.map (function
              | G.TA t -> Type.TA (type_of_ast_generic_type lang t)
              | G.TAWildcard (_, None) -> Type.TAWildcard None
              | G.TAWildcard (_, Some ((kind, _), t)) ->
@@ -215,7 +248,7 @@ and type_of_ast_generic_type lang t : G.name Type.t =
   | G.TyArray ((_l, size_expr, _r), elem_type) ->
       let size =
         match size_expr with
-        | Some { G.e = G.L (G.Int (Some n, _)); _ } -> Some n
+        | Some { G.e = G.L (G.Int pi); _ } -> Some pi
         | _else_ -> None
       in
       let elem_type = type_of_ast_generic_type lang elem_type in
@@ -223,7 +256,7 @@ and type_of_ast_generic_type lang t : G.name Type.t =
   | G.TyFun (params, tret) ->
       let params =
         params
-        |> Common.map (function
+        |> List_.map (function
              | G.Param { G.pname; ptype; _ } ->
                  let pident = Option.map fst pname in
                  let ptype =
@@ -246,6 +279,27 @@ and type_of_ast_generic_type lang t : G.name Type.t =
        * it up. *)
       let t, _id = type_of_expr lang e in
       t
+  | G.TyExpr
+      {
+        e =
+          ArrayAccess
+            ( { e = N (Id (("Union", _), _) as union); _ },
+              ( _,
+                {
+                  e =
+                    Container
+                      ( Tuple,
+                        ( _,
+                          [ { e = N (Id _ as name); _ }; { e = L (Null _); _ } ],
+                          _ ) );
+                  _;
+                },
+                _ ) );
+        _;
+      }
+  (* Python: Union[X, None] *)
+    when lang =*= Lang.Python ->
+      Type.N ((union, [ TA (N ((name, []), [])); TA Null ]), [])
   (* TODO: Need to expand Type.ml if we want to represent more *)
   | _else_ -> Type.NoType
 
@@ -271,7 +325,7 @@ let name_and_targs_of_named_type lang = function
         _ ) ->
       let (str_last, _), _ = name_last in
       let middle_strs =
-        middle |> Common.map (fun ((str, _info), _targs) -> str)
+        middle |> List_.map (fun ((str, _info), _targs) -> str)
       in
       let str = String.concat "." (middle_strs @ [ str_last ]) in
       Some (str, targs)
@@ -385,3 +439,4 @@ let typing_visitor =
  * Right now this pass focuses on giving types to names used as method calls,
  * for what it relies on 'guess_type_of_dotaccess'. *)
 let check_program lang prog = typing_visitor#visit_program lang prog
+[@@trace_debug]

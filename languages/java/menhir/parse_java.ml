@@ -12,10 +12,11 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the file
  * license.txt for more details.
  *)
-open Common
+open Fpath_.Operators
 module Flag = Flag_parsing
 module PS = Parsing_stat
 module TH = Token_helpers_java
+module Log = Log_lib_parsing.Log
 
 (*****************************************************************************)
 (* Prelude *)
@@ -37,16 +38,16 @@ let tokens input_source =
   let token = Lexer_java.token in
   Parsing_helpers.tokenize_all_and_adjust_pos input_source token
     TH.visitor_info_of_tok TH.is_eof
-  [@@profiling]
+[@@profiling]
 
 (*****************************************************************************)
 (* Main entry point *)
 (*****************************************************************************)
 let parse filename =
-  let stat = Parsing_stat.default_stat filename in
-  let filelines = Common2.cat_array filename in
+  let stat = Parsing_stat.default_stat !!filename in
+  let filelines = UFile.cat_array filename in
 
-  let toks = tokens (Parsing_helpers.file filename) in
+  let toks = tokens (Parsing_helpers.file !!filename) in
   let toks = Parsing_hacks_java.fix_tokens toks in
 
   let tr, lexer, lexbuf_fake =
@@ -60,7 +61,7 @@ let parse filename =
       (* -------------------------------------------------- *)
       (* Call parser *)
       (* -------------------------------------------------- *)
-      Left
+      Either.Left
         (Profiling.profile_code "Parser_java.main" (fun () ->
              Parser_java.goal lexer lexbuf_fake))
     with
@@ -81,26 +82,29 @@ let parse filename =
   in
 
   match elems with
-  | Left xs -> { Parsing_result.ast = xs; tokens = toks; stat }
-  | Right (_info_of_bads, line_error, cur) ->
+  | Either.Left xs -> { Parsing_result.ast = xs; tokens = toks; stat }
+  | Either.Right (_info_of_bads, line_error, cur) ->
       if not !Flag.error_recovery then
         raise (Parsing_error.Syntax_error (TH.info_of_tok cur));
 
-      if !Flag.show_parsing_error then
-        pr2 ("parse error \n = " ^ error_msg_tok cur);
-      let checkpoint2 = Common.cat filename |> List.length in
-
-      if !Flag.show_parsing_error then
-        Parsing_helpers.print_bad line_error (checkpoint, checkpoint2) filelines;
+      if !Flag.show_parsing_error then (
+        Log.err (fun m -> m "parse error \n = %s" (error_msg_tok cur));
+        let checkpoint2 = UFile.cat filename |> List.length in
+        Log.err (fun m ->
+            m "%s"
+              (Parsing_helpers.show_parse_error_line line_error
+                 (checkpoint, checkpoint2) filelines)));
       stat.PS.error_line_count <- stat.PS.total_line_count;
       { Parsing_result.ast = []; tokens = toks; stat }
-  [@@profiling]
+[@@profiling]
 
 let parse_program file =
   let res = parse file in
   res.Parsing_result.ast
 
-let parse_string (w : string) = Common2.with_tmp_file ~str:w ~ext:"java" parse
+let parse_string (caps : < Cap.tmp >) (w : string) :
+    (Ast_java.program, Parser_java.token) Parsing_result.t =
+  CapTmp.with_temp_file caps#tmp ~contents:w ~suffix:".java" parse
 
 (*****************************************************************************)
 (* Sub parsers *)

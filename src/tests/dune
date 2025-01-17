@@ -1,10 +1,19 @@
 (test
  (name test)
+ (action (run %{exe:test.exe})); Ensure we're running the native binary
  (libraries
     commons
     process_limits
     lib_parsing
     aliengrep
+    spacegrep_tests
+    paths
+    git_wrapper
+
+    ; unix platform stuff
+    lwt_platform.unix
+    tracing.unix
+    cohttp-lwt-unix
 
     commons.tests
     semgrep.analyzing.tests ; Unit_dataflow
@@ -17,14 +26,16 @@
     semgrep.parsing_languages
     semgrep.matching
     semgrep.synthesizing
-    semgrep.reporting
     semgrep.engine
-    semgrep.language_server
     parser_python.menhir parser_python.ast_generic
     semgrep.data
 
-    osemgrep_targeting
+    osemgrep_language_server
+    osemgrep_cli_login
+    osemgrep_cli_publish
+    semgrep.osemgrep_tests
   )
+ (modes native byte) ; bytecode here for debugging
  (preprocess
    (pps
       ppx_deriving.show

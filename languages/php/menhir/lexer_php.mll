@@ -43,7 +43,7 @@ let error s =
   then raise (Lexical s)
   else
     if !Flag.verbose_lexing
-    then pr2 ("LEXER: " ^ s)
+    then UCommon.pr2 ("LEXER: " ^ s)
 
 (* pad: hack around ocamllex to emulate the yyless() of flex. The semantic
  * is not exactly the same than yyless(), so I use yyback() instead.
@@ -59,7 +59,8 @@ let yyback n lexbuf =
 let tok = Lexing.lexeme
 let tokinfo = Tok.tok_of_lexbuf
 
-let tokinfo_str_pos = Tok.tok_of_str_and_bytepos
+let tokinfo_file_str_pos (file : Fpath.t) (str : string) (bytepos : int) : Tok.t
+  = Tok.make ~str ~bytepos ~file
 
 (* all string passed to T_IDENT or T_VARIABLE should go through case_str *)
 let case_str s =
@@ -100,7 +101,7 @@ let t_variable_or_metavar s info =
  *
  * todo: callable, goto
  *)
-let keyword_table = Common.hash_of_list [
+let keyword_table = Hashtbl_.hash_of_list [
 
   "while",   (fun ii -> T_WHILE ii);   "endwhile", (fun ii -> T_ENDWHILE ii);
   "do",      (fun ii -> T_DO ii);
@@ -289,8 +290,8 @@ let rec current_mode () =
       error("mode_stack is empty, defaulting to INITIAL");
       reset();
       current_mode ()
-let push_mode mode = Common.push mode _mode_stack
-let pop_mode () = ignore(Common2.pop2 _mode_stack)
+let push_mode mode = Stack_.push mode _mode_stack
+let pop_mode () = ignore(Stack_.pop _mode_stack)
 
 (* What is the semantic of BEGIN() in flex ? start from scratch with empty
  * stack ?
@@ -540,13 +541,14 @@ rule st_in_scripting = parse
 
         let syminfo = Tok.rewrap_str sym info in
 
+        let file = Tok.file_of_tok info in
         let parse_info = Tok.unsafe_loc_of_tok info in
         let pos_after_sym   =
-          parse_info.Tok.pos.charpos + String.length sym in
+          parse_info.Tok.pos.bytepos + String.length sym in
         let pos_after_white = pos_after_sym + String.length white in
 
-        let whiteinfo = tokinfo_str_pos white pos_after_sym in
-        let lblinfo = tokinfo_str_pos label pos_after_white in
+        let whiteinfo = tokinfo_file_str_pos file white pos_after_sym in
+        let lblinfo = tokinfo_file_str_pos file label pos_after_white in
 
         push_token (T_IDENT (case_str label, lblinfo));
        (* todo: could be newline ... *)
@@ -577,7 +579,7 @@ rule st_in_scripting = parse
           (* more? cf original lexer *)
           let s = tok lexbuf in
           let ii = tokinfo lexbuf in
-          T_LNUMBER (int_of_string_opt s, ii)
+          T_LNUMBER (Parsed_int.parse (s, ii))
         }
     | DNUM | EXPONENT_DNUM
         { T_DNUMBER(float_of_string_opt ( tok lexbuf), tokinfo lexbuf) }
@@ -631,8 +633,9 @@ rule st_in_scripting = parse
         let info = tokinfo lexbuf in
         let dollarinfo = Tok.rewrap_str (String.make 1 dollar) info in
         let parse_info = Tok.unsafe_loc_of_tok info in
-        let pos_after_sym = parse_info.Tok.pos.charpos + 2 in
-        let lblinfo = tokinfo_str_pos s pos_after_sym in
+        let file = Tok.file_of_tok info in
+        let pos_after_sym = parse_info.Tok.pos.bytepos + 2 in
+        let lblinfo = tokinfo_file_str_pos file s pos_after_sym in
 
         push_token (T_VARIABLE(case_str s, lblinfo));
         TDOLLAR dollarinfo
@@ -817,7 +820,7 @@ and initial = parse
            ("php"|"\"php\""|"\'php\'") WHITESPACE*">"
      {
        (* XXX if short_tags normally otherwise T_INLINE_HTML *)
-       (* pr2 "BAD USE OF <? at initial state, replace by <?php"; *)
+       (* UCommon.pr2 "BAD USE OF <? at initial state, replace by <?php"; *)
        set_mode ST_IN_SCRIPTING;
        T_OPEN_TAG(tokinfo lexbuf);
      }
@@ -901,12 +904,12 @@ and st_double_quotes = parse
     | "$" (LABEL as s)     { t_variable_or_metavar s (tokinfo lexbuf) }
     | "$" (LABEL as s) "[" {
           let info = tokinfo lexbuf in
-
+          let file = Tok.file_of_tok info in
           let varinfo = Tok.rewrap_str ("$" ^ s) info in
           let charpos_info = Tok.bytepos_of_tok varinfo in
           let pos_after_label = charpos_info + String.length ("$" ^ s) in
 
-          let bra_info = tokinfo_str_pos "[" pos_after_label in
+          let bra_info = tokinfo_file_str_pos file "[" pos_after_label in
           push_token (TOBRA bra_info);
           push_mode ST_VAR_OFFSET;
           T_VARIABLE(case_str s, varinfo)
@@ -950,11 +953,12 @@ and st_backquote = parse
     | "$" (LABEL as s) "[" {
           let info = tokinfo lexbuf in
 
+          let file = Tok.file_of_tok info in
           let varinfo = Tok.rewrap_str ("$" ^ s) info in
           let charpos_info = Tok.bytepos_of_tok varinfo in
           let pos_after_label = charpos_info + String.length ("$" ^ s) in
 
-          let bra_info = tokinfo_str_pos "[" pos_after_label in
+          let bra_info = tokinfo_file_str_pos file "[" pos_after_label in
           push_token (TOBRA bra_info);
           push_mode ST_VAR_OFFSET;
           T_VARIABLE(case_str s, varinfo)
@@ -997,14 +1001,15 @@ and st_start_heredoc stopdoc = parse
 
       let lbl_info = Tok.rewrap_str s info in
 
+      let file = Tok.file_of_tok info in
       let pos = Tok.bytepos_of_tok info in
       let pos_after_label = pos + String.length s in
       let pos_after_semi = pos_after_label + String.length semi in
 
       let colon_info =
-        tokinfo_str_pos semi pos_after_label in
+        tokinfo_file_str_pos file semi pos_after_label in
       let space_info =
-        tokinfo_str_pos (Common2.string_of_char space) pos_after_semi in
+        tokinfo_file_str_pos file (Common2.string_of_char space) pos_after_semi in
 
       if s = stopdoc
       then begin
@@ -1027,11 +1032,12 @@ and st_start_heredoc stopdoc = parse
     | "$" (LABEL as s) "[" {
           let info = tokinfo lexbuf in
 
+          let file = Tok.file_of_tok info in
           let varinfo = Tok.rewrap_str ("$" ^ s) info in
           let charpos_info = Tok.bytepos_of_tok varinfo in
           let pos_after_label = charpos_info + String.length ("$" ^ s) in
 
-          let bra_info = tokinfo_str_pos "[" pos_after_label in
+          let bra_info = tokinfo_file_str_pos file "[" pos_after_label in
           push_token (TOBRA bra_info);
           push_mode ST_VAR_OFFSET;
           T_VARIABLE(case_str s, varinfo)
@@ -1069,14 +1075,15 @@ and st_start_nowdoc stopdoc = parse
 
       let lbl_info = Tok.rewrap_str s info in
 
+      let file = Tok.file_of_tok info in
       let pos = Tok.bytepos_of_tok info in
       let pos_after_label = pos + String.length s in
       let pos_after_semi = pos_after_label + String.length semi in
 
       let colon_info =
-        tokinfo_str_pos semi pos_after_label in
+        tokinfo_file_str_pos file semi pos_after_label in
       let space_info =
-        tokinfo_str_pos (Common2.string_of_char space) pos_after_semi in
+        tokinfo_file_str_pos file (Common2.string_of_char space) pos_after_semi in
 
       if s = stopdoc
       then begin

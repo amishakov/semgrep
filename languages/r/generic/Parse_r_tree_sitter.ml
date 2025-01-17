@@ -12,6 +12,7 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the file
  * LICENSE for more details.
  *)
+open Fpath_.Operators
 module CST = Tree_sitter_r.CST
 module H = Parse_tree_sitter_helpers
 open AST_generic
@@ -28,8 +29,8 @@ let str = H.str
 let fb = Tok.unsafe_fake_bracket
 
 let combine_str_and_infos l xs r =
-  let s = xs |> Common.map fst |> String.concat "" in
-  let t = Tok.combine_toks l (Common.map snd xs @ [ r ]) in
+  let s = xs |> List_.map fst |> String.concat "" in
+  let t = Tok.combine_toks l (List_.map snd xs @ [ r ]) in
   (s, t)
 
 (*****************************************************************************)
@@ -68,7 +69,7 @@ let map_pat_3e57880 (env : env) (tok : CST.pat_3e57880) =
 let map_special (env : env) ((v1, v2, v3) : CST.special) : G.ident =
   let v1 = (* "%" *) token env v1 in
   let v2 =
-    Common.map
+    List_.map
       (fun x ->
         match x with
         | `Pat_5e7ac5f x -> map_pat_5e7ac5f env x
@@ -86,7 +87,7 @@ let map_identifier (env : env) (x : CST.identifier) : G.ident =
       | `BQUOT_rep_choice_pat_4ad362e_BQUOT (v1, v2, v3) ->
           let l = (* "`" *) token env v1 in
           let xs =
-            Common.map
+            List_.map
               (fun x ->
                 match x with
                 | `Pat_4ad362e x -> map_pat_4ad362e env x
@@ -104,7 +105,7 @@ let map_string_ (env : env) (x : CST.string_) : string G.wrap G.bracket =
   | `DQUOT_rep_choice_pat_de5d470_DQUOT (v1, v2, v3) ->
       let l = (* "\"" *) token env v1 in
       let xs =
-        Common.map
+        List_.map
           (fun x ->
             match x with
             | `Pat_de5d470 x -> map_pat_de5d470 env x
@@ -116,7 +117,7 @@ let map_string_ (env : env) (x : CST.string_) : string G.wrap G.bracket =
   | `SQUOT_rep_choice_pat_3e57880_SQUOT (v1, v2, v3) ->
       let l = (* "'" *) token env v1 in
       let xs =
-        Common.map
+        List_.map
           (fun x ->
             match x with
             | `Pat_3e57880 x -> map_pat_3e57880 env x
@@ -135,7 +136,7 @@ let rec map_argument (env : env) (x : CST.argument) : G.argument =
 
 and map_arguments (env : env) (xs : CST.arguments) : G.argument list =
   (* TODO ,, has a meaning? *)
-  Common.map_filter
+  List_.filter_map
     (fun x ->
       match x with
       | `Arg x -> Some (map_argument env x)
@@ -277,7 +278,7 @@ and map_expression (env : env) (x : CST.expression) : G.expr =
       N (H2.name_of_id id) |> G.e
   | `Int tok ->
       let s, t = (* integer *) str env tok in
-      L (Int (Common2.int_of_string_c_octal_opt s, t)) |> G.e
+      L (Int (Parsed_int.parse_c_octal (s, t))) |> G.e
   | `Float tok ->
       let s, t = (* float *) str env tok in
       L (Float (Common2.float_of_string_opt s, t)) |> G.e
@@ -308,7 +309,7 @@ and map_expression (env : env) (x : CST.expression) : G.expr =
   | `Assign x -> map_assignment env x
   | `Paren_list (v1, v2, v3) ->
       let l = (* "(" *) token env v1 in
-      let xs = Common.map (map_expression env) v2 in
+      let xs = List_.map (map_expression env) v2 in
       let r = (* ")" *) token env v3 in
       Container (Tuple, (l, xs, r)) |> G.e
   | `Bin x -> map_binary env x
@@ -469,7 +470,7 @@ and map_formal_parameter (env : env) (x : CST.formal_parameter) : G.parameter =
       let id = map_identifier env v1 in
       let _teq = (* "=" *) token env v2 in
       let e = map_expression env v3 in
-      G.Param (G.param_of_id id ~pdefault:(Some e))
+      G.Param (G.param_of_id id ~pdefault:e)
   | `Dots tok ->
       (* not semgrep-ext: either, part of the original language *)
       let t = (* "..." *) token env tok in
@@ -483,7 +484,7 @@ and map_formal_parameters (env : env) ((v1, v2, v3) : CST.formal_parameters) :
     | Some (v1, v2, v3) ->
         let e = map_formal_parameter env v1 in
         let xs =
-          Common.map
+          List_.map
             (fun (v1, v2) ->
               let _v1 = (* "," *) token env v1 in
               let v2 = map_formal_parameter env v2 in
@@ -543,7 +544,7 @@ and map_pipe_rhs_argument (env : env) (x : CST.pipe_rhs_argument) : G.argument =
 
 and map_pipe_rhs_arguments (env : env) (xs : CST.pipe_rhs_arguments) :
     G.argument list =
-  Common.map_filter
+  List_.filter_map
     (fun x ->
       match x with
       | `Pipe_rhs_arg x -> Some (map_pipe_rhs_argument env x)
@@ -553,7 +554,7 @@ and map_pipe_rhs_arguments (env : env) (xs : CST.pipe_rhs_arguments) :
     xs
 
 and map_program (env : env) (xs : CST.program) : G.program =
-  Common.map
+  List_.map
     (fun (v1, v2) ->
       let v1 = map_statement env v1 in
       let _v2 =
@@ -591,15 +592,15 @@ and map_unary (env : env) (x : CST.unary) : G.expr =
 (*****************************************************************************)
 let parse file =
   H.wrap_parser
-    (fun () -> Tree_sitter_r.Parse.file file)
-    (fun cst ->
+    (fun () -> Tree_sitter_r.Parse.file !!file)
+    (fun cst _extras ->
       let env = { H.file; conv = H.line_col_to_pos file; extra = () } in
       map_program env cst)
 
 let parse_pattern str =
   H.wrap_parser
     (fun () -> Tree_sitter_r.Parse.string str)
-    (fun cst ->
-      let file = "<pattern>" in
-      let env = { H.file; conv = Hashtbl.create 0; extra = () } in
+    (fun cst _extras ->
+      let file = Fpath.v "<pattern>" in
+      let env = { H.file; conv = H.line_col_to_pos_pattern str; extra = () } in
       G.Ss (map_program env cst))

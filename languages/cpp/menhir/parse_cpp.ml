@@ -13,7 +13,7 @@
  *
  *)
 open Common
-open File.Operators
+open Fpath_.Operators
 module Flag = Flag_parsing
 module PS = Parsing_stat
 module FT = File_type
@@ -22,8 +22,8 @@ module Flag_cpp = Flag_parsing_cpp
 module T = Parser_cpp
 module TH = Token_helpers_cpp
 module Lexer = Lexer_cpp
-
-let logger = Logging.get_logger [ __MODULE__ ]
+module Log = Log_parser_cpp.Log
+module LogLib = Log_lib_parsing.Log
 
 (*****************************************************************************)
 (* Prelude *)
@@ -34,9 +34,6 @@ let logger = Logging.get_logger [ __MODULE__ ]
  * See "Parsing C/C++ Code without Pre-Preprocessing - Yoann Padioleau, CC'09"
  * avalaible at http://padator.org/papers/yacfe-cc09.pdf
  *)
-(*
-let use_dypgen = false
-*)
 
 (*****************************************************************************)
 (* Error diagnostic *)
@@ -50,7 +47,7 @@ let error_msg_tok tok = Parsing_helpers.error_message_info (TH.info_of_tok tok)
 
 let commentized xs =
   xs
-  |> Common.map_filter (function
+  |> List_.filter_map (function
        | T.TComment_Pp (cppkind, ii) ->
            if !Flag_cpp.filter_classic_passed then
              match cppkind with
@@ -102,13 +99,13 @@ let is_same_line_or_close line tok =
 let tokens input_source =
   Parsing_helpers.tokenize_all_and_adjust_pos input_source Lexer.token
     TH.visitor_info_of_tok TH.is_eof
-  [@@profiling]
+[@@profiling]
 
 (*****************************************************************************)
 (* Fuzzy parsing *)
 (*****************************************************************************)
 
-let rec multi_grouped_list xs = xs |> List.map multi_grouped
+let rec multi_grouped_list xs = xs |> List_.map multi_grouped
 
 and multi_grouped = function
   | Token_views_cpp.Braces (tok1, xs, Some tok2) ->
@@ -130,14 +127,14 @@ and multi_grouped_list_comma xs =
   let rec aux acc xs =
     match xs with
     | [] ->
-        if null acc then []
-        else [ Left (acc |> List.rev |> multi_grouped_list) ]
+        if List_.null acc then []
+        else [ Either.Left (acc |> List.rev |> multi_grouped_list) ]
     | x :: xs -> (
         match x with
         | Token_views_cpp.Tok tok when Tok.content_of_tok (tokext tok) = "," ->
             let before = acc |> List.rev |> multi_grouped_list in
-            if null before then aux [] xs
-            else Left before :: Right (tokext tok) :: aux [] xs
+            if List_.null before then aux [] xs
+            else Either.Left before :: Either.Right (tokext tok) :: aux [] xs
         | _ -> aux (x :: acc) xs)
   in
   aux [] xs
@@ -153,10 +150,10 @@ let parse_fuzzy file =
       let toks_orig = tokens (Parsing_helpers.file !!file) in
       let toks =
         toks_orig
-        |> Common.exclude (fun x ->
+        |> List_.exclude (fun x ->
                Token_helpers_cpp.is_comment x || Token_helpers_cpp.is_eof x)
       in
-      let extended = toks |> List.map Token_views_cpp.mk_token_extended in
+      let extended = toks |> List_.map Token_views_cpp.mk_token_extended in
       Parsing_hacks_cpp.find_template_inf_sup extended;
       let groups = Token_views_cpp.mk_multi extended in
       let trees = multi_grouped_list groups in
@@ -169,7 +166,7 @@ let parse_fuzzy file =
 (* Extract macros *)
 (*****************************************************************************)
 
-(* It can be used to to parse the macros defined in a macro.h file. It
+(* It can be used to parse the macros defined in a macro.h file. It
  * can also be used to try to extract the macros defined in the file
  * that we try to parse *)
 let extract_macros file =
@@ -179,7 +176,7 @@ let extract_macros file =
       in
       let toks = Parsing_hacks_define.fix_tokens_define toks in
       Pp_token.extract_macros toks)
-  [@@profiling]
+[@@profiling]
 
 (* less: pass it as a parameter to parse_program instead ?
  * old: was a ref, but a hashtbl.t is actually already a kind of ref
@@ -195,7 +192,7 @@ let (_defs : (string, Pp_token.define_body) Hashtbl.t) = Hashtbl.create 101
 let add_defs file =
   if not (Sys.file_exists !!file) then
     failwith (spf "Could not find %s, have you set PFFF_HOME correctly?" !!file);
-  logger#info "Using %s macro file" !!file;
+  Log.info (fun m -> m "Using %s macro file" !!file);
   let xs = extract_macros file in
   xs |> List.iter (fun (k, v) -> Hashtbl.add _defs k v)
 
@@ -228,26 +225,27 @@ open Parsing_helpers
 let rec lexer_function tr lexbuf =
   match tr.rest with
   | [] ->
-      logger#error "LEXER: ALREADY AT END";
+      Log.warn (fun m -> m "LEXER: ALREADY AT END");
       tr.current
   | v :: xs ->
       tr.rest <- xs;
       tr.current <- v;
       tr.passed <- v :: tr.passed;
 
-      if !Flag.debug_lexer then pr2_gen v;
+      if !Flag.debug_lexer then
+        Log.debug (fun m -> m "tok = %s" (Dumper.dump v));
 
       if TH.is_comment v then lexer_function (*~pass*) tr lexbuf else v
 
 (* was a define ? *)
 let passed_a_define tr =
-  let xs = tr.passed |> List.rev |> Common.exclude TH.is_comment in
+  let xs = tr.passed |> List.rev |> List_.exclude TH.is_comment in
   if List.length xs >= 2 then
     match Common2.head_middle_tail xs with
     | T.TDefine _, _, T.TCommentNewline_DefineEndOfMacro _ -> true
     | _ -> false
   else (
-    logger#error "WIERD: length list of error recovery tokens < 2 ";
+    Log.warn (fun m -> m "WEIRD: length list of error recovery tokens < 2 ");
     false)
 
 (*****************************************************************************)
@@ -264,7 +262,7 @@ let passed_a_define tr =
 let parse_with_lang ?(lang = Flag_parsing_cpp.Cplusplus) file :
     (Ast.program, T.token) Parsing_result.t =
   let stat = Parsing_stat.default_stat !!file in
-  let filelines = Common2.cat_array !!file in
+  let filelines = UFile.cat_array file in
 
   (* -------------------------------------------------- *)
   (* call lexer and get all the tokens *)
@@ -274,7 +272,7 @@ let parse_with_lang ?(lang = Flag_parsing_cpp.Cplusplus) file :
   let toks =
     try Parsing_hacks.fix_tokens ~macro_defs:_defs lang toks_orig with
     | Token_views_cpp.UnclosedSymbol s ->
-        logger#error "unclosed symbol %s" s;
+        Log.warn (fun m -> m "unclosed symbol %s" s);
         if !Flag_cpp.debug_cplusplus then
           raise (Token_views_cpp.UnclosedSymbol s)
         else toks_orig
@@ -304,23 +302,6 @@ let parse_with_lang ?(lang = Flag_parsing_cpp.Cplusplus) file :
 
     let parse_toplevel tr lexbuf_fake =
       Parser_cpp.toplevel (lexer_function tr) lexbuf_fake
-      (*
-      if not use_dypgen
-      then
-      else
-        let (save1, save2, save3) = tr.PI.rest, tr.PI.current, tr.PI.passed in
-          Parser_cpp.toplevel (lexer_function tr) lexbuf_fake
-        try
-        with _e ->
-          tr.PI.rest <- save1; tr.PI.current <- save2; tr.PI.passed <- save3;
-          (try
-             Parser_cpp2.toplevel (lexer_function tr) lexbuf_fake
-             |> Common.hd_exn "unexpected empty list" |> fst
-           with Failure "hd" ->
-             logger#error "no elements";
-             raise Parsing.Parse_error
-          )
-*)
     in
 
     let elem =
@@ -338,20 +319,19 @@ let parse_with_lang ?(lang = Flag_parsing_cpp.Cplusplus) file :
                  (TH.info_of_tok tr.Parsing_helpers.current));
 
           (if !Flag.show_parsing_error then
-           match exn with
-           (* ocamlyacc *)
-           | Parsing.Parse_error
-           (* dypgen *)
-           | Dyp.Syntax_error
-           (* menhir *)
-           | Parser_cpp.Error ->
-               pr2
-                 ("parse error \n = " ^ error_msg_tok tr.Parsing_helpers.current)
-           | Parsing_error.Other_error (s, _i) ->
-               pr2
-                 ("semantic error " ^ s ^ "\n ="
-                 ^ error_msg_tok tr.Parsing_helpers.current)
-           | _ -> Exception.reraise e);
+             match exn with
+             (* ocamlyacc *)
+             | Parsing.Parse_error
+             (* menhir *)
+             | Parser_cpp.Error ->
+                 LogLib.err (fun m ->
+                     m "parse error \n = %s"
+                       (error_msg_tok tr.Parsing_helpers.current))
+             | Parsing_error.Other_error (s, _i) ->
+                 LogLib.err (fun m ->
+                     m "semantic error %s \n = %s" s
+                       (error_msg_tok tr.Parsing_helpers.current))
+             | _ -> Exception.reraise e);
 
           let line_error = TH.line_of_tok tr.Parsing_helpers.current in
 
@@ -362,7 +342,7 @@ let parse_with_lang ?(lang = Flag_parsing_cpp.Cplusplus) file :
           in
           let error_info =
             ( pbline
-              |> List.map (fun tok -> Tok.content_of_tok (TH.info_of_tok tok)),
+              |> List_.map (fun tok -> Tok.content_of_tok (TH.info_of_tok tok)),
               line_error )
           in
           stat.PS.problematic_lines <- error_info :: stat.PS.problematic_lines;
@@ -376,7 +356,7 @@ let parse_with_lang ?(lang = Flag_parsing_cpp.Cplusplus) file :
           tr.Parsing_helpers.passed <- passed';
 
           tr.Parsing_helpers.current <-
-            Common.hd_exn "can't be happening" passed';
+            List_.hd_exn "can't be happening" passed';
 
           (* <> line_error *)
           let info = TH.info_of_tok tr.Parsing_helpers.current in
@@ -387,11 +367,14 @@ let parse_with_lang ?(lang = Flag_parsing_cpp.Cplusplus) file :
           if !was_define && !Flag_cpp.filter_define_error then ()
           else if
             (* bugfix: *)
-            checkpoint_file = checkpoint2_file && checkpoint_file = !!file
+            checkpoint_file =*= checkpoint2_file && checkpoint_file =*= file
           then
-            Parsing_helpers.print_bad line_error (checkpoint, checkpoint2)
-              filelines
-          else pr2 "PB: bad: but on tokens not from original file";
+            Log.err (fun m ->
+                m "%s"
+                  (Parsing_helpers.show_parse_error_line line_error
+                     (checkpoint, checkpoint2) filelines))
+          else
+            Log.err (fun m -> m "PB: bad: but on tokens not from original file");
 
           let info_of_bads =
             Common2.map_eff_rev TH.info_of_tok tr.Parsing_helpers.passed
@@ -406,7 +389,7 @@ let parse_with_lang ?(lang = Flag_parsing_cpp.Cplusplus) file :
     let checkpoint2_file = Tok.file_of_tok info in
 
     let diffline =
-      if checkpoint_file = checkpoint2_file && checkpoint_file = !!file then
+      if checkpoint_file =*= checkpoint2_file && checkpoint_file =*= file then
         checkpoint2 - checkpoint
       else 0
       (* TODO? so if error come in middle of something ? where the
@@ -435,8 +418,8 @@ let parse_with_lang ?(lang = Flag_parsing_cpp.Cplusplus) file :
     | Some xs -> (xs, info) :: loop () (* recurse *)
   in
   let xs = loop () in
-  let ast = xs |> List.map fst in
-  let tokens = xs |> List.map snd |> List.flatten in
+  let ast = xs |> List_.map fst in
+  let tokens = xs |> List_.map snd |> List_.flatten in
   { Parsing_result.ast; tokens; stat }
 
 let parse2 file : (Ast.program, T.token) Parsing_result.t =
@@ -451,7 +434,7 @@ let parse file : (Ast.program, T.token) Parsing_result.t =
   Profiling.profile_code "Parse_cpp.parse" (fun () ->
       try parse2 file with
       | Stack_overflow ->
-          logger#error "PB stack overflow in %s" !!file;
+          Log.err (fun m -> m "Stack overflow in %s" !!file);
           {
             Parsing_result.ast = [];
             tokens = [];
@@ -474,7 +457,7 @@ let any_of_string lang s =
       let toks =
         try Parsing_hacks.fix_tokens ~macro_defs:_defs lang toks_orig with
         | Token_views_cpp.UnclosedSymbol s ->
-            logger#error "unclosed symbol %s" s;
+            Log.warn (fun m -> m "unclosed symbol %s" s);
             if !Flag_cpp.debug_cplusplus then
               raise (Token_views_cpp.UnclosedSymbol s)
             else toks_orig
@@ -489,37 +472,3 @@ let any_of_string lang s =
       (* Call parser *)
       (* -------------------------------------------------- *)
       Parser_cpp.semgrep_pattern (lexer_function tr) lexbuf_fake)
-
-(* experimental *)
-(*
-let parse_with_dypgen file =
-  (* -------------------------------------------------- *)
-  (* call lexer and get all the tokens *)
-  (* -------------------------------------------------- *)
-  let toks_orig = tokens (Parsing_helpers.file file) in
-  let lang = Flag_parsing_cpp.Cplusplus in
-
-  let toks =
-    try Parsing_hacks.fix_tokens ~macro_defs:_defs lang toks_orig
-    with Token_views_cpp.UnclosedSymbol s ->
-      pr2 s;
-      if !Flag_cpp.debug_cplusplus
-      then raise (Token_views_cpp.UnclosedSymbol s)
-      else toks_orig
-  in
-
-  let tr = Parse_info.mk_tokens_state toks in
-  let lexbuf_fake = Lexing.from_function (fun _buf _n -> raise Impossible) in
-
-  (* -------------------------------------------------- *)
-  (* Call parser *)
-  (* -------------------------------------------------- *)
-  (* TODO: not sure why but calling main is significanctly faster
-   * than calling toplevel in a loop
-  *)
-  try
-    Parser_cpp2.main (lexer_function tr) lexbuf_fake
-    |> Common.hd_exn "unexpected empty list" |> fst
-  with Dyp.Syntax_error ->
-    raise (Parse_info.Parsing_error (TH.info_of_tok tr.PI.current))
-*)

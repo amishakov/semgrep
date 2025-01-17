@@ -1,6 +1,6 @@
 (* Brandon Wu, Yoann Padioleau
  *
- * Copyright (C) 2022-2023 Semgrep Inc.
+ * Copyright (C) 2022-2024 Semgrep Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
@@ -34,31 +34,63 @@
    https://www.lihaoyi.com/post/HowtoworkwithFilesinScala.html
 *)
 
+open Common
+
 (*****************************************************************************)
 (* Types *)
 (*****************************************************************************)
 
-(* TODO? use of Fpath.t instead? or too confusing? *)
-type t = Rpath of string [@@deriving show, eq]
+type t = Rpath of Fpath.t [@@unboxed] [@@deriving show, eq]
 
 (*****************************************************************************)
 (* Main functions *)
 (*****************************************************************************)
 
-let of_fpath p = Rpath (Realpath.realpath p |> Fpath.to_string)
-let of_string s = Rpath (Realpath.realpath_str s)
-let to_fpath (Rpath s) = Fpath.v s
-let to_string (Rpath s) = s
-let canonical s = to_string (of_string s)
-let ( / ) (Rpath s1) s2 = of_string (Filename.concat s1 s2)
-let concat = ( / )
-let apply ~f (Rpath s) = f s
-let basename (Rpath s) = Filename.basename s
-let dirname (Rpath s) = Filename.dirname s |> of_string
-let extension (Rpath s) = Filename.extension s
+let of_string path =
+  try
+    let rpath = Unix.realpath path in
+    Ok (Rpath (Fpath.v rpath))
+  with
+  | Unix.Unix_error (err, _, _) ->
+      let msg =
+        spf "Cannot determine physical path for %S: %s" path
+          (Unix.error_message err)
+      in
+      Error msg
+  | other_exn ->
+      let msg =
+        spf "Cannot determine physical path for %S: %s" path
+          (Printexc.to_string other_exn)
+      in
+      Error msg
 
-(* TODO: probably better to direct people to the File module, and remove those
- * functions. People just have to use 'rpath |> Rpath.to_fpath |> xxx'
- *)
-let is_directory = apply ~f:Sys.is_directory
-let file_exists = apply ~f:Sys.file_exists
+let of_string_exn path_str =
+  match of_string path_str with
+  | Ok rpath -> rpath
+  | Error msg -> failwith msg
+
+let of_fpath path = of_string (Fpath.to_string path)
+let of_fpath_exn fpath = of_string_exn (Fpath.to_string fpath)
+let to_fpath (Rpath x) = x
+let canonical_exn s = to_fpath (of_fpath_exn s)
+
+(* deprecated *)
+let to_string (Rpath x) = Fpath.to_string x
+
+let getcwd () =
+  (* We could call 'Unix.getcwd' but it's not documented as returning
+     necessarily a physical path. Hopefully, this is fast enough. *)
+  of_string_exn "."
+
+let parent (Rpath path) =
+  let res = Fpath.parent path |> Fpath.rem_empty_seg in
+  if res <> path then Some (Rpath res) else None
+
+let contains (Rpath a) (Rpath b) =
+  let rec aux segs_a segs_b =
+    match (segs_a, segs_b) with
+    | seg_a :: segs_a, seg_b :: segs_b when seg_a = seg_b -> aux segs_a segs_b
+    | [], _ -> true
+    | _, _ -> false
+  in
+  aux (Fpath.segs a) (Fpath.segs b)

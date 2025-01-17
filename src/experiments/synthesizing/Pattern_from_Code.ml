@@ -65,17 +65,7 @@ let body_ellipsis t1 t2 = Block (t1, [ fk_stmt ], t2) |> G.s
 let _bk f (lp, x, rp) = (lp, f x, rp)
 
 let default_id str =
-  G.N
-    (Id
-       ( (str, fk),
-         {
-           id_resolved = ref None;
-           id_type = ref None;
-           id_svalue = ref None;
-           id_hidden = false;
-           id_info_id = IdInfoId.unsafe_default;
-         } ))
-  |> G.e
+  G.N (Id ((str, fk), empty_id_info ~id:IdInfoId.unsafe_default ())) |> G.e
 
 let default_tyvar str typ = TypedMetavar ((str, fk), fk, typ) |> G.e
 
@@ -272,7 +262,7 @@ and generalize_exp e env =
 (* Helper functions to make it easier to add all variations *)
 (* Generalizes e, then applies the same transformation f to each *)
 and add_expr e f env =
-  Common.map
+  List_.map
     (fun x ->
       match x with
       | str, E e' -> f (str, e')
@@ -280,7 +270,7 @@ and add_expr e f env =
     (generalize_exp e env)
 
 and add_stmt s f env =
-  Common.map
+  List_.map
     (fun x ->
       match x with
       | str, S s' -> f (str, s')

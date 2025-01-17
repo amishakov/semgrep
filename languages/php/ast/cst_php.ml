@@ -1,7 +1,7 @@
 (* Yoann Padioleau
  *
  * Copyright (C) 2009-2013 Facebook
- * Copyright (C) 2020 R2C
+ * Copyright (C) 2020 Semgrep Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
@@ -79,10 +79,10 @@ and 'a brace = tok * 'a * tok
 and 'a bracket = tok * 'a * tok
 and 'a angle = tok * 'a * tok
 and 'a single_angle = tok * 'a * tok
-and 'a comma_list = ('a, tok (* the comma *)) Common.either list
+and 'a comma_list = ('a, tok (* the comma *)) Either_.t list
 
 and 'a comma_list_dots =
-  ('a, tok (* ... in parameters *), tok (* the comma *)) Common.either3 list
+  ('a, tok (* ... in parameters *), tok (* the comma *)) Either_.either3 list
 [@@deriving show]
 
 (* ------------------------------------------------------------------------- *)
@@ -297,7 +297,7 @@ and scalar =
 
 and constant =
   | Bool of bool wrap
-  | Int of int option wrap (* decimal, hex, or binary int format *)
+  | Int of Parsed_int.t (* decimal, hex, or binary int format *)
   | Double of float option wrap
   (* see also Guil for interpolated strings
    * The string does not contain the enclosing '"' or "'".
@@ -687,7 +687,7 @@ and class_stmt =
   | UseTrait of
       tok (*use*)
       * class_name comma_list
-      * (tok (* ; *), trait_rule list brace) Common.either
+      * (tok (* ; *), trait_rule list brace) Either_.t
   (* ?? *)
   | ClassType of type_def
   (* semgrep-ext:  *)
@@ -729,7 +729,7 @@ and trait_rule =
       * class_name comma_list
       * tok (* ; *)
   | As of
-      (ident, name * tok * ident) Common.either
+      (ident, name * tok * ident) Either_.t
       * tok (* as *)
       * modifier wrap list
       * ident option
@@ -852,7 +852,7 @@ type any =
 (* Some constructors *)
 (*****************************************************************************)
 (* TODO: reuse Tok.fake_tok ? *)
-let fakeInfo ?(next_to = None) str = Tok.FakeTokStr (str, next_to)
+let fakeInfo ?next_to str = Tok.FakeTok (str, next_to)
 
 (*****************************************************************************)
 (* Wrappers *)
@@ -861,18 +861,18 @@ let fakeInfo ?(next_to = None) str = Tok.FakeTokStr (str, next_to)
 let unwrap = fst
 
 let uncomma xs =
-  Common.map_filter
+  List_.filter_map
     (function
-      | Left e -> Some e
-      | Right _info -> None)
+      | Either.Left e -> Some e
+      | Either.Right _info -> None)
     xs
 
 let uncomma_dots xs =
-  Common.map_filter
+  List_.filter_map
     (function
-      | Left3 e -> Some e
-      | Right3 _info
-      | Middle3 _info ->
+      | Either_.Left3 e -> Some e
+      | Either_.Right3 _info
+      | Either_.Middle3 _info ->
           None)
     xs
 
@@ -885,7 +885,7 @@ let unarg arg =
 
 let unargs xs =
   uncomma xs
-  |> Common.partition_either (function
+  |> Either_.partition (function
        | Arg e -> Left e
        | ArgRef (_, e)
        | ArgUnpack (_, e)
@@ -895,16 +895,16 @@ let unargs xs =
 let unmodifiers class_vars =
   match class_vars with
   | NoModifiers _ -> []
-  | VModifiers xs -> List.map unwrap xs
+  | VModifiers xs -> List_.map unwrap xs
 
 let map_paren f (lp, x, rp) = (lp, f x, rp)
 
 let map_comma_list f xs =
-  List.map
+  List_.map
     (fun x ->
       match x with
-      | Left e -> Left (f e)
-      | Right tok -> Right tok)
+      | Either.Left e -> Either.Left (f e)
+      | Either.Right tok -> Either.Right tok)
     xs
 
 (*****************************************************************************)
@@ -980,10 +980,10 @@ let str_of_name_namespace x =
       Tok.content_of_tok tok
   | XName xs ->
       xs
-      |> List.map (function
+      |> List_.map (function
            | QITok _ -> "\\"
            | QI id -> str_of_ident id)
-      |> Common.join ""
+      |> String.concat ""
 
 let name_of_class_name x =
   match x with

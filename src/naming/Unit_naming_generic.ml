@@ -1,5 +1,7 @@
 open Common
-open File.Operators
+open Fpath_.Operators
+
+let t = Testo.create
 
 (*****************************************************************************)
 (* Unit tests *)
@@ -9,10 +11,9 @@ open File.Operators
 let tests_path = "tests"
 
 let tests parse_program =
-  Testutil.pack_tests "naming generic"
+  Testo.categorize "naming generic"
     [
-      ( "regression files",
-        fun () ->
+      t "regression files" (fun () ->
           let dir = Filename.concat tests_path "naming/python" in
           let files1 = Common2.glob (spf "%s/*.py" dir) in
           let dir = Filename.concat tests_path "naming/go" in
@@ -23,12 +24,12 @@ let tests parse_program =
           let files4 = Common2.glob (spf "%s/*.java" dir) in
 
           files1 @ files2 @ files3 @ files4
-          |> File.Path.of_strings
+          |> Fpath_.of_strings
           |> List.iter (fun file ->
                  try
                    (* at least we can assert we don't thrown an exn or go
                       into infinite loops *)
-                   let ast = parse_program !!file in
+                   let ast = parse_program file in
                    let lang = Lang.lang_of_filename_exn file in
                    Naming_AST.resolve lang ast;
                    (* this used to loop forever if you were not handling correctly
@@ -37,5 +38,5 @@ let tests parse_program =
                    ()
                  with
                  | Parsing_error.Syntax_error _ ->
-                     Alcotest.failf "it should correctly parse %s" !!file) );
+                     Alcotest.failf "it should correctly parse %s" !!file));
     ]

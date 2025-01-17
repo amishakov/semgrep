@@ -1,12 +1,15 @@
 """
-This module provides an object for printing stuff nicely with rich's formatting features.
+This module provides an object for printing stuff nicely with rich's
+formatting features.
 
 The rich docs recommend this usage pattern here:
 https://rich.readthedocs.io/en/stable/console.html#console-api
 
-See also the semgrep.terminal module which is an earlier attempt to standardize some output configuration,
-but is more low level and doesn't really offload logic to other libraries.
+See also the semgrep.terminal module which is an earlier attempt to
+standardize some output configuration, but is more low level and
+doesn't really offload logic to other libraries.
 """
+from shutil import get_terminal_size
 from typing import Any
 from typing import Optional
 
@@ -95,21 +98,8 @@ class AutoIndentingConsole(Console):
         super().print(Padding.indent(Group(*args), indent), **kwargs)
 
 
-MAX_WIDTH = 160
-
-console = AutoIndentingConsole(highlighter=None)
-console.width = min(console.width, MAX_WIDTH)
-
-
-if __name__ == "__main__":
-    """Print samples of the above components."""
-    console.print("[bold]Semgrep output formatting samples:[/bold]", markup=True)
-    console.print(Title("Level 1"))
-    console.print("auto-indented text")
-    console.print(Title("Level 2", order=2))
-    console.print("auto-indented text")
-    console.print(Title("Level 3", order=3))
-    console.print("auto-indented text")
-    console.reset_title()
-    console.print("auto-indented text after title reset")
-    console.print("bit of markup: [/#]")
+MAX_WIDTH = 120
+MIN_WIDTH = 40
+terminal_width = get_terminal_size((MAX_WIDTH, 1))[0]
+safe_width = min(MAX_WIDTH, terminal_width) if terminal_width > MIN_WIDTH else MIN_WIDTH
+console = AutoIndentingConsole(highlighter=None, width=safe_width)

@@ -1,6 +1,6 @@
 (* Yoann Padioleau
  *
- * Copyright (C) 2019-2022 r2c
+ * Copyright (C) 2019-2022 Semgrep Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
@@ -13,6 +13,7 @@
  * LICENSE for more details.
  *)
 open AST_generic
+module Log = Log_matching.Log
 module H = AST_generic_helpers
 
 (*****************************************************************************)
@@ -33,6 +34,14 @@ let subexprs_of_any_list xs =
   |> List.fold_left
        (fun x -> function
          | E e -> e :: x
+         | _ -> x)
+       []
+
+let substmts_of_any_list xs =
+  xs
+  |> List.fold_left
+       (fun x -> function
+         | S s -> s :: x
          | _ -> x)
        []
 
@@ -61,25 +70,25 @@ let subexprs_of_stmt_kind = function
   (* n *)
   | For (_, MultiForEach es, _) ->
       es
-      |> Common.map_filter (function
+      |> List_.filter_map (function
            | FE (_, _, e) -> Some [ e ]
            | FECond ((_, _, e1), _, e2) -> Some [ e1; e2 ]
            | FEllipsis _ -> None)
-      |> List.concat
+      |> List_.flatten
   | For (_, ForClassic (xs, eopt1, eopt2), _) ->
       (xs
-      |> Common.map_filter (function
+      |> List_.filter_map (function
            | ForInitExpr e -> Some e
            | ForInitVar (_, vdef) -> vdef.vinit))
       @ Option.to_list eopt1 @ Option.to_list eopt2
   | Assert (_, (_, args, _), _) ->
       args
-      |> Common.map_filter (function
+      |> List_.filter_map (function
            | Arg e -> Some e
            | _ -> None)
-  | For (_, ForIn (_, es), _) -> es
   | OtherStmt (_op, xs) -> subexprs_of_any_list xs
   | OtherStmtWithStmt (_, xs, _) -> subexprs_of_any_list xs
+  | RawStmt x -> Raw_tree.anys x |> subexprs_of_any_list
   (* 0 *)
   | DirectiveStmt _
   | Block _
@@ -98,7 +107,7 @@ let subexprs_of_stmt st = subexprs_of_stmt_kind st.s
 
 let subexprs_of_args args =
   args |> Tok.unbracket
-  |> Common.map_filter (function
+  |> List_.filter_map (function
        | Arg e
        | ArgKwd (_, e)
        | ArgKwdOptional (_, e) ->
@@ -124,6 +133,8 @@ let subexprs_of_expr with_symbolic_propagation e =
   | Cast (_, _, e)
   | Ref (_, e)
   | DeRef (_, e)
+  | Alias (_, e)
+  | LocalImportAll (_, _, e)
   | DeepEllipsis (_, e, _)
   | DotAccessEllipsis (e, _) ->
       [ e ]
@@ -140,7 +151,7 @@ let subexprs_of_expr with_symbolic_propagation e =
   | Comprehension (_, (_, (e, xs), _)) ->
       e
       :: (xs
-         |> Common.map (function
+         |> List_.map (function
               | CompFor (_, _pat, _, e) -> e
               | CompIf (_, e) -> e))
   | New (_, _t, _ii, args) -> subexprs_of_args args
@@ -158,17 +169,16 @@ let subexprs_of_expr with_symbolic_propagation e =
       (* in theory we should go deeper in any *)
       subexprs_of_any_list anys
   | RawExpr x -> Raw_tree.anys x |> subexprs_of_any_list
-  | Alias (_, e1) -> [ e1 ]
   | Lambda def -> subexprs_of_stmt (H.funcbody_to_stmt def.fbody)
   | Xml { xml_attrs; xml_body; _ } ->
-      Common.map_filter
+      List_.filter_map
         (function
           | XmlAttr (_, _, e)
           | XmlAttrExpr (_, e, _) ->
               Some e
           | _ -> None)
         xml_attrs
-      @ Common.map_filter
+      @ List_.filter_map
           (function
             | XmlExpr (_, Some e, _) -> Some e
             | XmlXml xml -> Some (Xml xml |> AST_generic.e)
@@ -181,7 +191,7 @@ let subexprs_of_expr with_symbolic_propagation e =
   | LetPattern _ ->
       []
   | DisjExpr _ -> raise Common.Impossible
-  [@@profiling]
+[@@profiling]
 
 (* Need this wrapper because [@@profiling] has the side-effect of removing labels. *)
 let subexprs_of_expr ?(symbolic_propagation = false) e =
@@ -195,7 +205,8 @@ let subexprs_of_expr ?(symbolic_propagation = false) e =
  * but not necessarily any expressions like 'bar() || foo();'.
  * See tests/ts/deep_exprtmt.ts for more examples.
  *)
-let subexprs_of_expr_implicit with_symbolic_propagation e =
+let subexprs_of_expr_implicit (with_symbolic_propagation : bool) (e : expr) :
+    expr list =
   match e.e with
   | N (Id (_, { id_svalue = { contents = Some (Sym e1) }; _ }))
     when with_symbolic_propagation ->
@@ -254,6 +265,7 @@ let subexprs_of_expr_implicit with_symbolic_propagation e =
   | OtherExpr (_, _anys) -> []
   | RawExpr _ -> []
   | Alias (_, _e1) -> []
+  | LocalImportAll (_, _, _e1) -> []
   | Xml _xmlbody -> []
   | Constructor _ -> []
   | RegexpTemplate _ -> []
@@ -264,8 +276,9 @@ let subexprs_of_expr_implicit with_symbolic_propagation e =
   | DeepEllipsis _
   | DotAccessEllipsis _
   | DisjExpr _ ->
+      Log.err (fun m -> m "%s: impossible AST: %s" __FUNCTION__ (show_expr e));
       raise Common.Impossible
-  [@@profiling]
+[@@profiling]
 
 (* Need this wrapper because [@@profiling] has the side-effect of removing labels. *)
 let subexprs_of_expr_implicit ?(symbolic_propagation = false) e =
@@ -302,11 +315,14 @@ let substmts_of_stmt st =
       |> List.concat_map (function
            | CasesAndBody (_, st) -> [ st ]
            | CaseEllipsis _ -> [])
-  | Try (_, st, xs, opt) -> (
+  | Try (_, st, xs, opt1, opt2) -> (
       [ st ]
-      @ (xs |> Common.map Common2.thd3)
+      @ (xs |> List_.map Common2.thd3)
+      @ (match opt1 with
+        | None -> []
+        | Some (_, st) -> [ st ])
       @
-      match opt with
+      match opt2 with
       | None -> []
       | Some (_, st) -> [ st ])
   | DisjStmt _ -> raise Common.Impossible
@@ -329,7 +345,8 @@ let substmts_of_stmt st =
         (* this will add lots of substatements *)
         | FuncDef def -> [ H.funcbody_to_stmt def.fbody ]
         | ClassDef def ->
-            def.cbody |> Tok.unbracket |> Common.map (function F st -> st))
+            def.cbody |> Tok.unbracket |> List_.map (function F st -> st))
+  | RawStmt x -> Raw_tree.anys x |> substmts_of_any_list
 
 (*****************************************************************************)
 (* Visitors  *)
@@ -346,11 +363,11 @@ let lambdas_in_expr e =
       inherit [_] AST_generic.iter_no_id_info
 
       (* TODO Should we recurse into the Lambda? *)
-      method! visit_Lambda aref def = Common.push def aref
+      method! visit_Lambda aref def = Stack_.push def aref
     end
   in
   do_visit_with_ref visitor (E e)
-  [@@profiling]
+[@@profiling]
 
 (* opti: using memoization speed things up a bit too
  * (but again, this is still slow when called many many times).
@@ -363,7 +380,7 @@ let hmemo = Hashtbl.create 101
 
 let lambdas_in_expr_memo a =
   Common.memoized hmemo a (fun () -> lambdas_in_expr a)
-  [@@profiling]
+[@@profiling]
 
 (*****************************************************************************)
 (* Really substmts_of_stmts *)
@@ -371,7 +388,7 @@ let lambdas_in_expr_memo a =
 
 let flatten_substmts_of_stmts xs =
   (* opti: using a ref, List.iter, and Common.push instead of a mix of
-   * List.map, List.flatten and @ below speed things up
+   * List.map, List_.flatten and @ below speed things up
    * (but it is still slow when called many many times)
    *)
   let res = ref [] in
@@ -379,19 +396,19 @@ let flatten_substmts_of_stmts xs =
 
   let rec aux x =
     (* return the current statement first, and add substmts *)
-    Common.push x res;
+    Stack_.push x res;
 
     (* this can be really slow because lambdas_in_expr() below can be called
      * a zillion times on big files (see tests/PERF/) if we do the
      * matching naively in m_stmts_deep.
      *)
     (if !go_really_deeper_stmt then
-     let es = subexprs_of_stmt x in
-     (* getting deeply nested lambdas stmts *)
-     let lambdas = es |> List.concat_map lambdas_in_expr_memo in
-     lambdas
-     |> Common.map (fun def -> H.funcbody_to_stmt def.fbody)
-     |> List.iter aux);
+       let es = subexprs_of_stmt x in
+       (* getting deeply nested lambdas stmts *)
+       let lambdas = es |> List.concat_map lambdas_in_expr_memo in
+       lambdas
+       |> List_.map (fun def -> H.funcbody_to_stmt def.fbody)
+       |> List.iter aux);
 
     let xs = substmts_of_stmt x in
     match xs with
@@ -409,4 +426,4 @@ let flatten_substmts_of_stmts xs =
            This is used as part of the caching optimization. *)
         Some (List.rev !res, last)
   else None
-  [@@profiling]
+[@@profiling]

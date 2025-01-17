@@ -238,18 +238,18 @@ let rec compare_aux l1 l2 =
   | t1, Node (l2, v2, r2, _) :: t2 ->
       compare_aux t1 (l2 :: Node (Empty, v2, r2, 0) :: t2)
 
-let compare s1 s2 = compare_aux [ s1 ] [ s2 ]
-let equal s1 s2 = compare s1 s2 = 0
-
 let rec subset s1 s2 =
   match (s1, s2) with
   | Empty, _ -> true
   | _, Empty -> false
   | Node (l1, v1, r1, _), (Node (l2, v2, r2, _) as t2) ->
-      let c = Stdlib.compare v1 v2 in
+      let c = compare v1 v2 in
       if c = 0 then subset l1 l2 && subset r1 r2
       else if c < 0 then subset (Node (l1, v1, Empty, 0)) l2 && subset r1 t2
       else subset (Node (Empty, v1, r1, 0)) r2 && subset l1 t2
+
+let compare s1 s2 = compare_aux [ s1 ] [ s2 ]
+let equal s1 s2 = compare s1 s2 = 0
 
 let rec iter f = function
   | Empty -> ()
@@ -300,3 +300,10 @@ let choose = min_elt
 (* pad: *)
 let (of_list : 'a list -> 'a t) =
  fun xs -> List.fold_left (fun a e -> add e a) empty xs
+
+(* martin: *)
+let pp pp_elt fmt set =
+  let pp_comma fmt () = Format.fprintf fmt ",@ " in
+  Format.fprintf fmt "{%a}"
+    (Format.pp_print_list ~pp_sep:pp_comma pp_elt)
+    (elements set)

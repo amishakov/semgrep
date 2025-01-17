@@ -1,11 +1,3 @@
-(* old implementation, returning bad absolute fpaths instead of
- * "readable" fpaths
- *)
-val get_targets :
-  Find_targets.conf ->
-  Fpath.t list (* scanning roots *) ->
-  Fpath.t list * Output_from_core_t.skipped_target list
-
 (*
    [legacy implementation used in semgrep-core]
 
@@ -33,4 +25,4 @@ val files_of_dirs_or_files :
   ?sort_by_decr_size:bool ->
   Lang.t option ->
   Fpath.t list ->
-  Fpath.t list * Output_from_core_t.skipped_target list
+  Fpath.t list * Semgrep_output_v1_t.skipped_target list

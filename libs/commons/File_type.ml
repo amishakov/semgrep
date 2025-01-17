@@ -1,6 +1,7 @@
 (* Yoann Padioleau
  *
  * Copyright (C) 2010-2013 Facebook
+ * Copyright (C) 2023 Semgrep Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
@@ -13,7 +14,7 @@
  * license.txt for more details.
  *)
 open Common
-open File.Operators
+open Fpath_.Operators
 
 (*****************************************************************************)
 (* Prelude *)
@@ -34,6 +35,7 @@ type file_type =
   | Media of media_type
   | Archive of string (* tgz, rpm, etc *)
   | Other of string
+[@@deriving yojson]
 
 (* programming languages *)
 and pl_type =
@@ -58,6 +60,7 @@ and pl_type =
   | ObjectiveC of string
   | Swift
   (* advanced script *)
+  | Julia
   | Perl
   | Python
   | Ruby
@@ -67,28 +70,35 @@ and pl_type =
   | Erlang
   | Go
   | Rust
+  | Move
   | Beta
   | Pascal
-  | Web of webpl_type
   | Haxe
-  | Opa
-  | Flash
   | Bytecode of string
   | Asm
-  | Thrift
+  | Web of webpl_type
+  | IDL of idl_type
   | MiscPL of string
+  | Elixir
+[@@deriving yojson]
 
 and config_type =
   | Makefile
   | Dockerfile
+  (* note: XML is in webpl_type below *)
   | Json
   | Jsonnet
+  | Properties (* Java config *)
+  | Ignore of string (* any sort of .gitignore *)
+  | RC of string (* Usually key value, .yarnrc, .npmrc etc. *)
   (* kinda pl_type *)
   | Yaml
   | Terraform
   | Sexp (* e.g., dune files *)
+  | Toml
+[@@deriving yojson]
 
-and lisp_type = CommonLisp | Elisp | Scheme | Clojure
+and lisp_type = CommonLisp | Elisp | Scheme | Clojure [@@deriving yojson]
 
 and webpl_type =
   | Php of string (* php or phpt or script *)
@@ -98,11 +108,18 @@ and webpl_type =
   | Coffee
   | Vue
   | Css
+  | Scss
   | Html
   | Xml
+  | Opa
+  | Flash
   | Sql
+[@@deriving yojson]
+
+and idl_type = Thrift | ATD | Protobuf [@@deriving yojson]
 
 and media_type = Sound of string | Picture of string | Video of string
+[@@deriving yojson]
 
 (*****************************************************************************)
 (* Main entry point *)
@@ -112,7 +129,9 @@ and media_type = Sound of string | Picture of string | Video of string
  * filenames, so it has to be fast!
  *)
 let file_type_of_file file =
-  let _d, b, e = Common2.dbe_of_filename_noext_ok !!file in
+  let _d, b, e = Filename_.dbe_of_filename_noext_ok !!file in
+  (* extensions are not case sensitive, at least on windows! *)
+  let e = String.lowercase_ascii e in
   match e with
   | "ml"
   | "mli"
@@ -145,9 +164,9 @@ let file_type_of_file file =
   | "hxp"
   | "hxml" ->
       PL Haxe
-  | "opa" -> PL Opa
+  | "opa" -> PL (Web Opa)
   | "sk" -> PL Skip
-  | "as" -> PL Flash
+  | "as" -> PL (Web Flash)
   | "bet" -> PL Beta
   (* todo detect false C file, look for "Mode: Objective-C++" string in file ?
    * can also be a c++, use Parser_cplusplus.is_problably_cplusplus_file
@@ -175,7 +194,9 @@ let file_type_of_file file =
   | "kt" -> PL Kotlin
   | "cs" -> PL Csharp
   | "p" -> PL Pascal
-  | "thrift" -> PL Thrift
+  | "thrift" -> PL (IDL Thrift)
+  | "atd" -> PL (IDL ATD)
+  | "proto" -> PL (IDL Protobuf)
   | "scm"
   | "rkt"
   | "ss"
@@ -190,6 +211,7 @@ let file_type_of_file file =
   | "py"
   | "pyi" ->
       PL Python
+  | "jl" -> PL Julia
   | "rb" -> PL Ruby
   | "logic" -> PL (Prolog "logic") (* datalog of logicblox *)
   | "dtl" -> PL (Prolog "dtl") (* bddbddb *)
@@ -228,6 +250,7 @@ let file_type_of_file file =
   | "hack" (* | "hh" *) ->
       (* ".hh" is also a popular choice for C++ header files *)
       PL (Web Hack)
+  | "scss" -> PL (Web Scss)
   | "css" -> PL (Web Css)
   (* "javascript" | "es" | ? *)
   | "js" -> PL (Web Js)
@@ -240,12 +263,16 @@ let file_type_of_file file =
   | "htm" ->
       PL (Web Html)
   | "xml" -> PL (Web Xml)
+  | "properties" -> Config Properties
   | "json" -> Config Json
-  | "jsonnet" -> Config Jsonnet
+  | "jsonnet"
+  | "libsonnet" ->
+      Config Jsonnet
   | "yml"
   | "yaml" ->
       Config Yaml
   | "tf" -> Config Terraform
+  | "toml" -> Config Toml
   (* sometimes people use foo.Dockerfile *)
   | "Dockerfile" -> Config Dockerfile
   | "sql" -> PL (Web Sql)
@@ -258,9 +285,12 @@ let file_type_of_file file =
   | "sql3" -> PL (Web Sql)
   | "fbobj" -> PL (MiscPL "fbobj")
   | "png"
+  | "psd" (* photoshop *)
+  | "ai" (* adobe illustrator *)
   | "jpg"
-  | "JPG"
   | "gif"
+  | "svg"
+  | "tif"
   | "tiff" ->
       Media (Picture e)
   | "xcf"
@@ -272,11 +302,13 @@ let file_type_of_file file =
       Media (Picture e)
   | "ppm" -> Media (Picture e)
   | "tga" -> Media (Picture e)
+  | "woff2"
   | "ttf"
   | "font" ->
       Media (Picture e)
   | "wav" -> Media (Sound e)
   | "swf" -> Media (Picture e)
+  | "indd" (* indesign document *)
   | "ps"
   | "pdf" ->
       Doc e
@@ -352,6 +384,7 @@ let file_type_of_file file =
   | "clang2" ->
       Obj e
   (* was Archive *)
+  | "xlsx" -> Archive e (* excel spreadsheets. They're zip files! *)
   | "jar" -> Archive e
   | "bz2" -> Archive e
   | "gz" -> Archive e
@@ -360,21 +393,30 @@ let file_type_of_file file =
   | "exe" -> Binary e
   | "mk" -> Config Makefile
   | "rs" -> PL Rust
-  | "go" -> PL Go
+  | "move" -> PL Move
+  | "mod"
+  | "go" ->
+      PL Go
   | "lua" -> PL Lua
-  | "r"
-  | "R" ->
-      PL R
-  | _ when File.is_executable file -> Binary e
+  | "r" -> PL R
+  | "ex" -> PL Elixir
+  | _ when UFile.is_executable file -> Binary e
   | _ when b = "Makefile" || b = "mkfile" || b = "Imakefile" -> Config Makefile
   | _ when b = "Dockerfile" -> Config Dockerfile
   | _ when b = "dune" -> Config Sexp
   | _ when b = "README" -> Text "txt"
+  | _ when b = "CODEOWNERS" -> Text "txt"
+  | _ when b = "LICENSE" -> Text "txt"
   | _ when b = "TAGS" -> Binary e
   | _ when b = "TARGETS" -> Config Makefile
   | _ when b = ".depend" -> Obj "depend"
   | _ when b = ".emacs" -> PL (Lisp Elisp)
-  | _ when File.filesize file > 300_000 -> Obj e
+  | _ when b = ".gitattributes" -> Text b
+  | _ when b = ".gitkeep" -> Text b
+  | _ when String.starts_with "." b && String.ends_with "ignore" b ->
+      Config (Ignore b)
+  | _ when String.starts_with "." b && String.ends_with "rc" b -> Config (RC b)
+  | _ when UFile.filesize file > 300_000 -> Obj e
   | _ -> Other e
 
 (*****************************************************************************)
@@ -407,6 +449,6 @@ let is_syncweb_obj_file file = !!file =~ ".*md5sum_"
 let is_json_filename filename = !!filename =~ ".*\\.json$"
 
 let files_of_dirs_or_files p xs =
-  xs |> File.files_of_dirs_or_files_no_vcs_nofilter
+  xs |> UFile.files_of_dirs_or_files_no_vcs_nofilter
   |> List.filter (fun filename -> p (file_type_of_file filename))
-  |> Common.sort
+  |> List_.sort

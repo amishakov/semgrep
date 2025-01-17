@@ -1,5 +1,6 @@
 import importlib.resources
 import os
+import platform
 import shutil
 import sys
 from pathlib import Path
@@ -9,6 +10,10 @@ from semgrep.verbose_logging import getLogger
 
 logger = getLogger(__name__)
 
+VERSION_STAMP_FILENAME = "pro-installed-by.txt"
+
+IS_WINDOWS = platform.system() == "Windows"
+
 
 def compute_executable_path(exec_name: str) -> Optional[str]:
     """
@@ -16,6 +21,9 @@ def compute_executable_path(exec_name: str) -> Optional[str]:
 
     Return None if no executable found
     """
+    if IS_WINDOWS:
+        exec_name += ".exe"
+
     # First, try packaged binaries
     try:
         with importlib.resources.path("semgrep.bin", exec_name) as path:
@@ -82,3 +90,7 @@ class SemgrepCore:
             cls._PRO_PATH_ = compute_executable_path("semgrep-core-proprietary")
 
         return Path(cls._PRO_PATH_) if cls._PRO_PATH_ is not None else None
+
+    @classmethod
+    def pro_version_stamp_path(cls) -> Path:
+        return cls.path().parent / VERSION_STAMP_FILENAME

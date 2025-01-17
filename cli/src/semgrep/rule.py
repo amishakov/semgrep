@@ -1,7 +1,5 @@
 import hashlib
 import json
-from enum import auto
-from enum import Enum
 from typing import Any
 from typing import AnyStr
 from typing import cast
@@ -12,12 +10,12 @@ from typing import Sequence
 from typing import Set
 from typing import Union
 
-import semgrep.output_from_core as core
-from semgrep.constants import RuleSeverity
+import semgrep.semgrep_interfaces.semgrep_output_v1 as out
+from semgrep.constants import RuleScanSource
 from semgrep.error import InvalidRuleSchemaError
+from semgrep.error_location import Span
 from semgrep.rule_lang import EmptySpan
 from semgrep.rule_lang import RuleValidation
-from semgrep.rule_lang import Span
 from semgrep.rule_lang import YamlMap
 from semgrep.rule_lang import YamlTree
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Ecosystem
@@ -25,11 +23,6 @@ from semgrep.semgrep_types import JOIN_MODE
 from semgrep.semgrep_types import LANGUAGE
 from semgrep.semgrep_types import Language
 from semgrep.semgrep_types import SEARCH_MODE
-
-
-class RuleProduct(Enum):
-    sast = auto()
-    sca = auto()
 
 
 class Rule:
@@ -52,12 +45,12 @@ class Rule:
         def resolve_language_string(language_str: str) -> Language:
             # Replace "generic" in the "languages" list by the engine specified
             # in the options section.
-            xlang_str = (
+            analyzer_str = (
                 self.options_dict.get("generic_engine", "spacegrep")
                 if language_str == "generic"
                 else language_str
             )
-            return LANGUAGE.resolve(xlang_str, lang_span)
+            return LANGUAGE.resolve(analyzer_str, lang_span)
 
         rule_languages: Set[Language] = {
             resolve_language_string(l) for l in self._raw.get("languages", [])
@@ -65,6 +58,8 @@ class Rule:
 
         # add typescript to languages if the rule supports javascript.
         # TODO: Move this hack to lang.json
+        # coupling: if you move this hack, also fix
+        # Core_runner.add_typescript_to_javascript_rules_hack
         if any(
             language == LANGUAGE.resolve("javascript") for language in rule_languages
         ):
@@ -135,12 +130,12 @@ class Rule:
         return self._excludes
 
     @property
-    def id(self) -> str:  # TODO: return a core.RuleId
+    def id(self) -> str:  # TODO: return a out.RuleId
         return self._id
 
     @property
-    def id2(self) -> core.RuleId:  # TODO: merge with id
-        return core.RuleId(self._id)
+    def id2(self) -> out.RuleId:  # TODO: merge with id
+        return out.RuleId(self._id)
 
     @property
     def message(self) -> str:
@@ -148,20 +143,27 @@ class Rule:
 
     @property
     def metadata(self) -> Dict[str, Any]:
-        return self._raw.get("metadata", {})
+        return self._raw.get("metadata") or {}
 
     @property
     def is_blocking(self) -> bool:
         """
         Returns if this rule indicates matches should block CI
         """
+
+        validation_state_metadata = self.metadata.get(
+            "dev.semgrep.validation_state.actions"
+        )
+        if validation_state_metadata:
+            return "block" in validation_state_metadata.values()
+
         return "block" in self.metadata.get("dev.semgrep.actions", ["block"])
 
     @property
-    def severity(self) -> RuleSeverity:
+    def severity(self) -> out.MatchSeverity:
         # TODO: add additional severity for extract rules, or how should this
         # be handled?
-        return RuleSeverity(self._raw.get("severity", RuleSeverity.INFO))
+        return out.MatchSeverity.from_json(self._raw.get("severity", "INFO"))
 
     @property
     def mode(self) -> str:
@@ -210,12 +212,6 @@ class Rule:
     def fix(self) -> Optional[str]:
         return self._raw.get("fix")
 
-    # TODO: use v1.FixRegex and do the validation currently done
-    # in core_output.convert_to_rule_match() here
-    @property
-    def fix_regex(self) -> Optional[Dict[str, Any]]:
-        return self._raw.get("fix-regex")
-
     @classmethod
     def from_json(cls, rule_json: Dict[str, Any]) -> "Rule":
         return cls(rule_json, None)
@@ -254,12 +250,34 @@ class Rule:
         return any(key in RuleValidation.PATTERN_KEYS for key in self._raw)
 
     @property
-    def product(self) -> RuleProduct:
-        return (
-            RuleProduct.sca
-            if "r2c-internal-project-depends-on" in self._raw
-            else RuleProduct.sast
-        )
+    def product(self) -> out.Product:
+        if "r2c-internal-project-depends-on" in self._raw:
+            return out.Product(out.SCA())
+        elif "product" in self.metadata:
+            if self.metadata.get("product") == "secrets":
+                return out.Product(out.Secrets())
+            else:
+                return out.Product(out.SAST())
+        else:
+            return out.Product(out.SAST())
+
+    @property
+    def scan_source(self) -> RuleScanSource:
+        src: str = self.metadata.get("semgrep.dev", {}).get("src", "")
+        if src == "unchanged":
+            return RuleScanSource.unchanged
+        elif src == "new-version":
+            return RuleScanSource.new_version
+        elif src == "new-rule":
+            return RuleScanSource.new_rule
+        elif src == "previous-scan":
+            return RuleScanSource.previous_scan
+        else:
+            return RuleScanSource.unannotated
+
+    @property
+    def from_transient_scan(self) -> bool:
+        return self.scan_source == RuleScanSource.previous_scan
 
     @property
     def formula_string(self) -> str:
@@ -281,10 +299,10 @@ class Rule:
                 for key in sorted(raw.keys()):
                     next_raw = raw.get(key)
                     if next_raw is not None:
-                        patterns_to_add.append(get_subrules(next_raw))  # type: ignore[arg-type]
+                        patterns_to_add.append(get_subrules(next_raw))
             elif isinstance(raw, list):
                 for p in raw:
-                    patterns_to_add.append(get_subrules(p))  # type: ignore[arg-type]
+                    patterns_to_add.append(get_subrules(p))
             else:
                 raise ValueError(
                     f"This rule contains an unexpected pattern key: {self.id}:\n {str(raw)}"
@@ -296,9 +314,12 @@ class Rule:
             for k in sorted(RuleValidation.PATTERN_KEYS):
                 next_raw = self.raw.get(k)
                 if next_raw is not None:
+                    # print(k)
+                    # print(next_raw)
                     patterns_to_add.append(get_subrules(next_raw))
                     if k == "join" and "on" in next_raw:
                         patterns_to_add += get_subrules(next_raw["on"])
+            # print(patterns_to_add)
             res = " ".join(sorted(patterns_to_add))
             if not res:
                 raise ValueError(f"This rule contains no hashable patterns: {self.id}")

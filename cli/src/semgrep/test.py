@@ -1,14 +1,5 @@
-"""
-For each directory containing YAML rules, run those rules on the file in the same directory with the same name but different extension.
-E.g. eqeq.yaml runs on eqeq.py.
-Validate that the output is annotated in the source file with by looking for a comment like:
-
- ```
- # ruleid:eqeq-is-bad
- ```
- On the preceeding line.
-
- """
+# This file is DEPRECATED! Please modify instead osemgrep test in
+# src/osemgrep/cli_test/Test_subcommand.ml
 import collections
 import difflib
 import functools
@@ -18,6 +9,7 @@ import os
 import shutil
 import sys
 import tempfile
+import traceback
 import uuid
 from itertools import product
 from pathlib import Path
@@ -33,9 +25,9 @@ from typing import Tuple
 from boltons.iterutils import partition
 from ruamel.yaml import YAML
 
+import semgrep.run_scan
 from semgrep.constants import BREAK_LINE
 from semgrep.engine import EngineType
-from semgrep.semgrep_main import invoke_semgrep
 from semgrep.util import final_suffix_matches
 from semgrep.util import is_config_fixtest_suffix
 from semgrep.util import is_config_suffix
@@ -61,15 +53,26 @@ def _remove_ending_comments(rule: str) -> str:
     return rule
 
 
+# Partial support for pro/deep annotations by just skipping them.
+# Use osemgrep test --pro if you actually want to process those annotations.
 def normalize_rule_ids(line: str) -> Set[str]:
     """
     given a line like `     # ruleid:foobar`
     or `      // ruleid:foobar`
+    or `      // ruleid:deepok:foobar`
     return `foobar`
     """
-    _, rules_text = line.strip().split(":")
+    _, rules_text = line.strip().split(":", 1)
     rules_text = rules_text.strip()
-    rules = rules_text.split(",")
+    # strip out "deepok" and "deepruleid" annotations if they are there to get rule name
+    if (
+        rules_text.startswith("deepok")
+        or rules_text.startswith("prook")
+        or rules_text.startswith("deepruleid")
+        or rules_text.startswith("proruleid")
+    ):
+        _, rules_text = rules_text.split(":")
+    rules = rules_text.strip().split(",")
     # remove comment ends for non-newline comment syntaxes
     rules_clean = map(lambda rule: _remove_ending_comments(rule), rules)
     return set(filter(None, [rule.strip() for rule in rules_clean]))
@@ -294,12 +297,12 @@ def invoke_semgrep_multi(
     config: Path, targets: List[Path], **kwargs: Any
 ) -> Tuple[Path, Optional[str], Any]:
     try:
-        output = invoke_semgrep(config, targets, **kwargs)
-    except Exception as error:
+        output = semgrep.run_scan.run_scan_and_return_json(config, targets, **kwargs)
+    except Exception:
         # We must get the string of the error because the multiprocessing library
         # will fail the marshal the error and hang
         # See: https://bugs.python.org/issue39751
-        return (config, str(error), {})
+        return (config, traceback.format_exc(), {})
     else:
         return (config, None, output)
 
@@ -414,9 +417,11 @@ def get_config_fixtest_filenames(
 def config_contains_fix_key(config: Path) -> bool:
     with open(config) as file:
         yaml = YAML(typ="safe")  # default, if not specfied, is 'rt' (round-trip)
-        rule = yaml.load(file)
-        if rule.get("rules"):
-            return "fix" in rule["rules"][0]
+        rules = yaml.load(file)
+        if rules.get("rules"):
+            return any(
+                ("fix" in rule or "fix-regex" in rule) for rule in rules["rules"]
+            )
         else:
             return False
 
@@ -470,11 +475,20 @@ def generate_test_results(
 
     config_missing_tests_output = [str(c[0]) for c in config_without_tests]
 
+    # in a test context, we don't want to honor the paths: (include/exclude)
+    # directive since the test target file, which must have the same
+    # basename than the rule, may not match the paths: of the rule
+    respect_rule_paths = False
+    no_git_ignore = True
+    no_rewrite_rule_ids = True
+    # COUPLING: the arguments are the same as the second semgrep-core
+    # invocation later in this file (except for one)!
     invoke_semgrep_fn = functools.partial(
         invoke_semgrep_multi,
         engine_type=engine_type,
-        no_git_ignore=True,
-        no_rewrite_rule_ids=True,
+        no_git_ignore=no_git_ignore,
+        respect_rule_paths=respect_rule_paths,
+        no_rewrite_rule_ids=no_rewrite_rule_ids,
         strict=strict,
         optimizations=optimizations,
     )
@@ -559,14 +573,16 @@ def generate_test_results(
     ]
 
     # This is the invocation of semgrep for testing autofix.
-    #
-    # TODO: should 'engine' be set to 'engine=engine' or always 'engine=EngineType.OSS'?
+    # COUPLING: except for autofix, the arguments are the same as above
     invoke_semgrep_with_autofix_fn = functools.partial(
         invoke_semgrep_multi,
-        no_git_ignore=True,
-        no_rewrite_rule_ids=True,
+        engine_type=engine_type,
+        no_git_ignore=no_git_ignore,
+        respect_rule_paths=respect_rule_paths,
+        no_rewrite_rule_ids=no_rewrite_rule_ids,
         strict=strict,
         optimizations=optimizations,
+        # only option that differs from the earlier call to semgrep-core:
         autofix=True,
     )
 
@@ -590,8 +606,8 @@ def generate_test_results(
         os.remove(tempcopy)
 
     output = {
-        "config_missing_tests": config_missing_tests_output,
-        "config_missing_fixtests": configs_missing_fixtests,
+        "config_missing_tests": sorted(config_missing_tests_output),
+        "config_missing_fixtests": sorted(configs_missing_fixtests),
         "config_with_errors": config_with_errors_output,
         "results": results_output,
         "fixtest_results": fixtest_results_output,
@@ -615,6 +631,7 @@ def generate_test_results(
         print(json.dumps(output, indent=4, separators=(",", ": ")))
         sys.exit(exit_code)
 
+    # else text ouput
     num_tests = 0
     num_tests_passed = 0
     check_output_lines: str = ""
@@ -647,7 +664,7 @@ def generate_test_results(
             "No unit tests found. See https://semgrep.dev/docs/writing-rules/testing-rules"
         )
     elif num_tests == num_tests_passed:
-        print(f"{num_tests_passed}/{num_tests}: ✓ All tests passed ")
+        print(f"{num_tests_passed}/{num_tests}: ✓ All tests passed")
     else:
         print(
             f"{num_tests_passed}/{num_tests}: {num_tests - num_tests_passed} unit tests did not pass:"
@@ -658,7 +675,7 @@ def generate_test_results(
     if num_fixtests == 0:
         print("No tests for fixes found.")
     elif num_fixtests == num_fixtests_passed:
-        print(f"{num_fixtests_passed}/{num_fixtests}: ✓ All fix tests passed ")
+        print(f"{num_fixtests_passed}/{num_fixtests}: ✓ All fix tests passed")
     else:
         print(
             f"{num_fixtests_passed}/{num_fixtests}: {num_fixtests - num_fixtests_passed} fix tests did not pass: "

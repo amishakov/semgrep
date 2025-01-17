@@ -12,12 +12,13 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the file
  * license.txt for more details.
  *)
-open Common
+open Fpath_.Operators
 module Ast = Cst_php
 module Flag = Flag_parsing
 module Flag_php = Flag_parsing_php
 module TH = Token_helpers_php
 module PS = Parsing_stat
+module Log = Log_lib_parsing.Log
 
 (*****************************************************************************)
 (* Prelude *)
@@ -70,7 +71,7 @@ let tokens ?(init_state = Lexer_php.INITIAL) input_source =
   in
   Parsing_helpers.tokenize_all_and_adjust_pos input_source token
     TH.visitor_info_of_tok TH.is_eof
-  [@@profiling]
+[@@profiling]
 
 let is_comment v =
   TH.is_comment v
@@ -85,56 +86,11 @@ let is_comment v =
 (* Main entry point *)
 (*****************************************************************************)
 
-let parse ?(pp = !Flag_php.pp_default) filename =
-  let orig_filename = filename in
-  let filename =
-    (* note that now that pfff support XHP constructs directly,
-     * this code is not that needed.
-     *)
-    match pp with
-    | None -> orig_filename
-    | Some cmd ->
-        Profiling.profile_code "Parse_php.pp_maybe" (fun () ->
-            let pp_flag = if !Flag_php.verbose_pp then "-v" else "" in
+let parse filename =
+  let stat = Parsing_stat.default_stat !!filename in
+  let filelines = UFile.cat_array filename in
 
-            (* The following requires the preprocessor command to
-             * support the -q command line flag.
-             *
-             * Maybe a little bit specific to XHP and xhpize ... But
-             * because I use as a convention that 0 means no_need_pp, if
-             * the preprocessor does not support -q, it should return an
-             * error code, in which case we will fall back to the regular
-             * case. *)
-            let cmd_need_pp = spf "%s -q %s %s" cmd pp_flag filename in
-            if !Flag_php.verbose_pp then pr2 (spf "executing %s" cmd_need_pp);
-            let ret = Sys.command cmd_need_pp in
-            if ret =|= 0 then orig_filename
-            else
-              Profiling.profile_code "Parse_php.pp" (fun () ->
-                  let tmpfile = Common.new_temp_file "pp" ".pphp" in
-                  let fullcmd =
-                    spf "%s %s %s > %s" cmd pp_flag filename tmpfile
-                  in
-                  if !Flag_php.verbose_pp then pr2 (spf "executing %s" fullcmd);
-                  let ret = Sys.command fullcmd in
-                  if ret <> 0 then
-                    failwith "The preprocessor command returned an error code";
-                  tmpfile))
-  in
-
-  let stat = Parsing_stat.default_stat filename in
-  let filelines = Common2.cat_array filename in
-
-  let toks = tokens (Parsing_helpers.file filename) in
-  (* note that now that pfff support XHP constructs directly,
-   * this code is not that needed.
-   *)
-  let toks =
-    if filename = orig_filename then toks
-    else
-      (* Pp_php.adapt_tokens_pp ~tokenizer:tokens ~orig_filename toks *)
-      failwith "no more pp"
-  in
+  let toks = tokens (Parsing_helpers.file !!filename) in
   let toks = Parsing_hacks_php.fix_tokens toks in
 
   let tr, lexer, lexbuf_fake =
@@ -148,7 +104,7 @@ let parse ?(pp = !Flag_php.pp_default) filename =
       (* -------------------------------------------------- *)
       (* Call parser *)
       (* -------------------------------------------------- *)
-      Left
+      Either.Left
         (Profiling.profile_code "Parser_php.main" (fun () ->
              Parser_php.main lexer lexbuf_fake))
     with
@@ -169,17 +125,18 @@ let parse ?(pp = !Flag_php.pp_default) filename =
   in
 
   match elems with
-  | Left xs -> { Parsing_result.ast = xs; tokens = toks; stat }
-  | Right (info_of_bads, line_error, cur) ->
+  | Either.Left xs -> { Parsing_result.ast = xs; tokens = toks; stat }
+  | Either.Right (info_of_bads, line_error, cur) ->
       if not !Flag.error_recovery then
         raise (Parsing_error.Syntax_error (TH.info_of_tok cur));
 
-      if !Flag.show_parsing_error then
-        pr2 ("parse error\n = " ^ error_msg_tok cur);
-      let checkpoint2 = Common.cat filename |> List.length in
-
-      if !Flag.show_parsing_error then
-        Parsing_helpers.print_bad line_error (checkpoint, checkpoint2) filelines;
+      if !Flag.show_parsing_error then (
+        Log.err (fun m -> m "parse error\n = %s" (error_msg_tok cur));
+        let checkpoint2 = UFile.cat filename |> List.length in
+        Log.err (fun m ->
+            m "%s"
+              (Parsing_helpers.show_parse_error_line line_error
+                 (checkpoint, checkpoint2) filelines)));
       (* TODO: just count the skipped lines; Use Hashtbl.length strategy *)
       stat.PS.error_line_count <- stat.PS.total_line_count;
 
@@ -189,10 +146,10 @@ let parse ?(pp = !Flag_php.pp_default) filename =
         tokens = info_item;
         stat;
       }
-  [@@profiling]
+[@@profiling]
 
-let parse_program ?pp file =
-  let res = parse ?pp file in
+let parse_program file =
+  let res = parse file in
   res.Parsing_result.ast
 
 (*****************************************************************************)
@@ -210,59 +167,7 @@ let any_of_string s =
       in
       Parser_php.semgrep_pattern lexer lexbuf_fake)
 
-(*
- * todo: obsolete now with parse_any ? just redirect to parse_any ?
- *
- * This function is useful not only to test but also in our own code
- * as a shortcut to build complex expressions
- *)
-let (expr_of_string : string -> Cst_php.expr) =
- fun s ->
-  let tmpfile = Common.new_temp_file "pfff_expr_of_s" "php" in
-  Common.write_file tmpfile ("<?php \n" ^ s ^ ";\n");
-
-  let ast = parse_program tmpfile in
-
-  let res =
-    match ast with
-    | [ Ast.TopStmt (Ast.ExprStmt (e, _tok)); Ast.FinalDef _ ] -> e
-    | _ -> failwith "only expr pattern are supported for now"
-  in
-  Common.erase_this_temp_file tmpfile;
-  res
-
-(* It is clearer for our testing code to programmatically build source files
- * so that all the information about a test is in the same
- * file. You don't have to open extra files to understand the test
- * data. This function is useful mostly for our unit tests
- *)
-let (program_of_string : string -> Cst_php.program) =
- fun s ->
-  let tmpfile = Common.new_temp_file "pfff_expr_of_s" "php" in
-  Common.write_file tmpfile ("<?php \n" ^ s ^ "\n");
-  let ast = parse_program tmpfile in
-  Common.erase_this_temp_file tmpfile;
-  ast
-
-(* use program_of_string when you can *)
-let tmp_php_file_from_string ?(header = "<?php\n") s =
-  let tmp_file = Common.new_temp_file "test" ".php" in
-  Common.write_file ~file:tmp_file (header ^ s);
-  tmp_file
-
-(* this function is useful mostly for our unit tests *)
-let (tokens_of_string : string -> Parser_php.token list) =
- fun str ->
-  let str = "<?php \n" ^ str ^ "\n" in
-  tokens (Parsing_helpers.Str str)
-
-(* A fast-path parser of xdebug expressions in xdebug dumpfiles.
- * See xdebug.ml *)
-let (xdebug_expr_of_string : string -> Cst_php.expr) =
- fun _s ->
-  (*
-  let lexbuf = Lexing.from_string s in
-  let expr = Parser_php.expr basic_lexer_skip_comments lexbuf in
-  expr
-*)
-  raise Todo
+let program_of_string s =
+  match any_of_string s with
+  | Cst_php.Program x -> x
+  | _else_ -> failwith ("not a program: " ^ s)

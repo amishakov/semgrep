@@ -4,11 +4,13 @@ from typing import Optional
 
 from boltons.iterutils import get_path
 
+from semgrep import tracing
 from semgrep.state import get_state
 
 logger = logging.getLogger(__name__)
 
 
+@tracing.trace()
 def get_deployment_from_token(token: str) -> Optional[str]:
     """
     Returns the deployment name the token is for, if token is valid
@@ -69,11 +71,10 @@ def _read_token_from_settings_file() -> Optional[str]:
     logger.debug("Getting API token from settings file")
     settings = get_state().settings
     login_token = settings.get("api_token")
-
-    if login_token and not isinstance(login_token, str):
-        raise ValueError()
-
-    return login_token
+    if login_token is None:
+        logger.debug("No API token found in settings file")
+        return None
+    return f"{login_token}"
 
 
 def set_token(token: str) -> None:
@@ -85,13 +86,12 @@ def set_token(token: str) -> None:
     settings.set("api_token", token)
 
 
-def delete_token() -> None:
-    """
-    Remove api token from settings file
-    """
-    logger.debug("Deleting api token from settings file")
-    settings = get_state().settings
-    settings.delete("api_token")
+# "weak" because a real check would interact with the backend to
+# double check that the token is valid.
+# coupling: is_logged_in_weak() in osemgrep
+def is_logged_in_weak() -> bool:
+    token = get_token()
+    return token is not None
 
 
 def is_a_tty() -> bool:

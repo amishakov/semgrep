@@ -10,7 +10,7 @@ let create ?gitignore_filenames ?(higher_priority_levels = [])
     project_root;
     higher_priority_levels;
     gitignore_file_cache =
-      Gitignores_cache.create ?gitignore_filenames ~project_root ();
+      Gitignore_cache.create ?gitignore_filenames ~project_root ();
     lower_priority_levels;
   }
 
@@ -52,6 +52,7 @@ let select_one acc levels path : Gitignore.selection_event list =
           | None -> acc)
         acc level.patterns)
     acc levels
+[@@profiling]
 
 let select_path opt_gitignore_file_cache sel_events levels relative_segments =
   let rec loop sel_events levels parent_path segments =
@@ -63,7 +64,7 @@ let select_path opt_gitignore_file_cache sel_events levels relative_segments =
           match opt_gitignore_file_cache with
           | Some cache -> (
               (* load local gitignore file *)
-              match Gitignores_cache.load cache parent_path with
+              match Gitignore_cache.load cache parent_path with
               | Some additional_level -> levels @ [ additional_level ]
               | None -> levels)
           | None -> levels
@@ -71,6 +72,11 @@ let select_path opt_gitignore_file_cache sel_events levels relative_segments =
         (* check whether partial path should be gitignored *)
         let file_path = parent_path / segment in
         let sel_events = select_one sel_events levels file_path in
+        let deselected =
+          match sel_events with
+          | Deselected _ :: _ -> true
+          | _ -> false
+        in
         if is_selected sel_events then
           (* stop here, don't go deeper as per gitignore spec *)
           sel_events
@@ -79,6 +85,8 @@ let select_path opt_gitignore_file_cache sel_events levels relative_segments =
           | []
           | [ "" ] ->
               loop sel_events levels file_path segments
+          (* If a path has been deselected, don't test for dir-only patterns *)
+          | _ :: _ when deselected -> loop sel_events levels file_path segments
           | _ :: _ ->
               (* add trailing slash to match directory-only patterns *)
               let dir_path = file_path / "" in
@@ -96,12 +104,9 @@ let select_path opt_gitignore_file_cache sel_events levels relative_segments =
    Each time we descend into a folder, we read the .gitignore files in
    that folder which add filters to the existing filters found earlier.
 *)
-let select t sel_events (full_git_path : Ppath.t) =
-  let rel_segments =
-    match Ppath.segments full_git_path with
-    | "" :: xs -> xs
-    | __else__ -> assert false
-  in
+let select t (full_git_path : Ppath.t) =
+  let sel_events = [] in
+  let rel_segments = Ppath.relative_segments full_git_path in
   (* higher levels (command-line)
      and middle levels (gitignore files discovered along the way) *)
   let sel_events =
@@ -115,4 +120,4 @@ let select t sel_events (full_git_path : Ppath.t) =
       select_path None sel_events t.lower_priority_levels rel_segments
     in
     result_of_selection_events sel_events
-  [@@profiling]
+[@@profiling]

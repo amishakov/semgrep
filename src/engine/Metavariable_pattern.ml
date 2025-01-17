@@ -1,6 +1,6 @@
 (* Iago Abal
  *
- * Copyright (C) 2021-2022 r2c
+ * Copyright (C) 2021-2022 Semgrep Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
@@ -17,8 +17,7 @@ open Match_env
 module MV = Metavariable
 module RM = Range_with_metavars
 module G = AST_generic
-
-let logger = Logging.get_logger [ __MODULE__ ]
+module Log = Log_engine.Log
 
 (*****************************************************************************)
 (* Prelude *)
@@ -28,9 +27,10 @@ let logger = Logging.get_logger [ __MODULE__ ]
 (* Helpers *)
 (*****************************************************************************)
 
-let adjust_content_for_language (xlang : Xlang.t) (content : string) : string =
-  match xlang with
-  | Xlang.L (Lang.Php, _)
+let adjust_content_for_language (analyzer : Analyzer.t) (content : string) :
+    string =
+  match analyzer with
+  | Analyzer.L (Lang.Php, _)
     when not (content =~ {|[ \t\n]*<\?\(php\|=\)?[ \t\n]+|}) ->
       (* THINK:
          * - Shouldn't the parser just handle the absence of `<?php` ?
@@ -83,31 +83,27 @@ let get_persistent_bindings revert_loc r nested_matches =
     AST_generic_helpers.fix_token_locations_any revert_loc
   in
   nested_matches
-  |> Common.map (fun nested_match ->
+  |> List_.map (fun nested_match ->
          (* The bindings in this match were produced from a target whose location
              data was all adjusted, to avoid re-parsing.
          *)
          let readjusted_mvars =
            nested_match.RM.mvars
-           |> Common.map_filter (fun (mvar, mval) ->
-                  match
+           |> List_.map (fun (mvar, mval) ->
+                  let mval =
                     mval |> MV.mvalue_to_any |> reverting_visitor
                     |> MV.mvalue_of_any
-                  with
-                  | None ->
-                      logger#error "Failed to convert mvar %s to and from any"
-                        mvar;
-                      None
-                  | Some mval -> Some (mvar, mval))
+                  in
+                  (mvar, mval))
          in
          { nested_match with RM.mvars = readjusted_mvars })
-  |> Common.map (fun r' -> filter_new_mvars_by_range r r'.RM.mvars)
+  |> List_.map (fun r' -> filter_new_mvars_by_range r r'.RM.mvars)
 
 (*****************************************************************************)
 (* Entry point *)
 (*****************************************************************************)
 let get_nested_metavar_pattern_bindings get_nested_formula_matches env r mvar
-    (opt_xlang : Xlang.t option) formula =
+    (opt_analyzer : Analyzer.t option) formula =
   let bindings = r.RM.mvars in
   (* If anything goes wrong the default is to filter out! *)
   match List.assoc_opt mvar bindings with
@@ -140,27 +136,25 @@ let get_nested_metavar_pattern_bindings get_nested_formula_matches env r mvar
           (* We don't want having to re-parse `content', but then we
            * need to fix the token locations in `mast`. *)
           let mast_start_loc =
-            mval |> MV.ii_of_mval |> AST_generic_helpers.range_of_tokens |> fst
-            |> Tok.unsafe_loc_of_tok
+            mval |> MV.ii_of_mval |> AST_generic_helpers.range_of_tokens_unsafe
+            |> fst |> Tok.unsafe_loc_of_tok
           in
-          let fix_loc file loc =
+          let mast_start_pos = mast_start_loc.pos in
+          let fix_loc (file : Fpath.t) (loc : Tok.location) : Tok.location =
             (* The column is only perturbed if this loc is on the first line of
              * the original metavariable match *)
+            let pos = loc.pos in
             let column =
-              if loc.Tok.pos.line =|= mast_start_loc.Tok.pos.line then
-                loc.pos.column - mast_start_loc.pos.column
-              else loc.pos.column
+              if pos.line =|= mast_start_pos.line then
+                pos.column - mast_start_pos.column
+              else pos.column
             in
-            {
-              loc with
-              pos =
-                {
-                  charpos = loc.pos.charpos - mast_start_loc.pos.charpos;
-                  line = loc.pos.line - mast_start_loc.pos.line + 1;
-                  column;
-                  file;
-                };
-            }
+            let pos =
+              Pos.make file ~column
+                ~line:(pos.line - mast_start_pos.line + 1)
+                (pos.bytepos - mast_start_pos.bytepos)
+            in
+            { loc with pos }
           in
           (* We need to undo the changes made to the file location,
              for when we preserve this binding and re-localize it to
@@ -168,29 +162,21 @@ let get_nested_metavar_pattern_bindings get_nested_formula_matches env r mvar
           *)
           let revert_loc (loc : Tok.location) =
             (* See fix_loc *)
+            let pos = loc.pos in
             let column =
-              if loc.pos.line =|= 1 then
-                loc.pos.column + mast_start_loc.pos.column
-              else loc.pos.column
+              if pos.line =|= 1 then pos.column + mast_start_pos.column
+              else pos.column
             in
-            {
-              loc with
-              pos =
-                {
-                  charpos = loc.Tok.pos.charpos + mast_start_loc.pos.charpos;
-                  line = loc.pos.line + mast_start_loc.pos.line - 1;
-                  column;
-                  file = mval_file;
-                };
-            }
+            let pos =
+              Pos.make mval_file ~column
+                ~line:(pos.line + mast_start_pos.line - 1)
+                (pos.bytepos + mast_start_pos.bytepos)
+            in
+            { loc with pos }
           in
-          match opt_xlang with
+          match opt_analyzer with
           | None -> (
-              (* We match wrt the same language as the rule.
-               * NOTE: A generic pattern nested inside a generic won't work because
-               *   generic mode binds metavariables to `MV.Text`, and
-               *   `MV.program_of_mvalue` does not handle `MV.Text`. So one must
-               *   specify `language: generic` (case `Some xlang` below). *)
+              (* We match wrt the same language as the rule. *)
               match MV.program_of_mvalue mval with
               | None ->
                   error env
@@ -203,9 +189,11 @@ let get_nested_metavar_pattern_bindings get_nested_formula_matches env r mvar
                   (* Note that due to symbolic propagation, `mast` may be
                    * outside of the current file/AST, so we must get
                    * `mval_range` from `mval_file` and not from `env.file`! *)
-                  let content = Range.content_at_range mval_file mval_range in
-                  Xpattern_matcher.with_tmp_file ~str:content
-                    ~ext:"mvar-pattern" (fun file ->
+                  let contents = Range.content_at_range mval_file mval_range in
+                  (* TODO: find a way to not use tmp files! parse strings *)
+                  (* nosemgrep: forbid-tmp *)
+                  UTmp.with_temp_file ~contents ~suffix:".mvar-pattern"
+                    (fun (file : Fpath.t) ->
                       let mast' =
                         AST_generic_helpers.fix_token_locations_program
                           (fix_loc file) mast
@@ -213,9 +201,13 @@ let get_nested_metavar_pattern_bindings get_nested_formula_matches env r mvar
                       let xtarget =
                         {
                           env.xtarget with
-                          file = Fpath.v file;
+                          path =
+                            {
+                              env.xtarget.path with
+                              internal_path_to_content = file;
+                            };
                           lazy_ast_and_errors = lazy (mast', []);
-                          lazy_content = lazy content;
+                          lazy_content = lazy contents;
                         }
                       in
                       (* Persist the bindings from inside the `metavariable-pattern`
@@ -223,7 +215,7 @@ let get_nested_metavar_pattern_bindings get_nested_formula_matches env r mvar
                       *)
                       get_nested_formula_matches { env with xtarget } formula r'
                       |> get_persistent_bindings revert_loc r))
-          | Some xlang -> (
+          | Some analyzer -> (
               let content =
                 (* Previously we only allowed metavariable-pattern with a
                  * different language when the metavariable was bound to a
@@ -240,7 +232,7 @@ let get_nested_metavar_pattern_bindings get_nested_formula_matches env r mvar
                  * a metavariable binding. For this case, we just use the
                  * original program text as it exists in the target program, at
                  * the range to which the metavariable is bound. *)
-                match (xlang, mval) with
+                match (analyzer, mval) with
                 | _, MV.Text (content, _tok, _)
                 | _, MV.Xmls [ XmlText (content, _tok) ]
                 | _, MV.E { e = G.L (G.String (_, (content, _tok), _)); _ } ->
@@ -257,20 +249,26 @@ let get_nested_metavar_pattern_bindings get_nested_formula_matches env r mvar
                    * `$STRING` binds to some text (except when using language:
                    * generic, see above) but it can naturally bind to other
                    * string expressions. *)
-                  logger#debug
-                    "metavariable-pattern failed because the content of %s is \
-                     not text: %s"
-                    mvar (MV.show_mvalue mval);
+                  Log.debug (fun m ->
+                      m
+                        "metavariable-pattern failed because the content of %s \
+                         is not text: %s"
+                        mvar (MV.show_mvalue mval));
                   []
-              | Some content ->
-                  let content = adjust_content_for_language xlang content in
-                  logger#debug "nested analysis of |||%s||| with lang '%s'"
-                    content (Xlang.to_string xlang);
-                  (* We re-parse the matched text as `xlang`. *)
-                  Xpattern_matcher.with_tmp_file ~str:content
-                    ~ext:"mvar-pattern" (fun file ->
+              | Some contents ->
+                  let contents =
+                    adjust_content_for_language analyzer contents
+                  in
+                  Log.info (fun m ->
+                      m "nested analysis of |||%s||| with lang '%s'" contents
+                        (Analyzer.to_string analyzer));
+                  (* We re-parse the matched text as `analyzer`. *)
+                  (* TODO: find a way to not use tmp files! parse strings *)
+                  (* nosemgrep: forbid-tmp *)
+                  UTmp.with_temp_file ~contents ~suffix:".mvar-pattern"
+                    (fun file ->
                       let ast_and_errors_res =
-                        match xlang with
+                        match analyzer with
                         | L (lang, _) -> (
                             try
                               let { Parsing_result2.ast; skipped_tokens; _ } =
@@ -282,15 +280,15 @@ let get_nested_metavar_pattern_bindings get_nested_formula_matches env r mvar
                                * created. *)
                               let skipped_tokens =
                                 skipped_tokens
-                                |> Common.map (fun tok -> revert_loc tok)
+                                |> List_.map (fun tok -> revert_loc tok)
                               in
                               if skipped_tokens <> [] then
-                                pr2
-                                  (spf
-                                     "rule %s: metavariable-pattern: failed to \
-                                      fully parse the content of %s"
-                                     (fst env.rule.Rule.id :> string)
-                                     mvar);
+                                Log.warn (fun m ->
+                                    m
+                                      "rule %s: metavariable-pattern: failed \
+                                       to fully parse the content of %s"
+                                      (Rule_ID.to_string (fst env.rule.Rule.id))
+                                      mvar);
                               Ok (lazy (ast, skipped_tokens))
                             with
                             | Parsing_error.Syntax_error tk ->
@@ -310,16 +308,22 @@ let get_nested_metavar_pattern_bindings get_nested_formula_matches env r mvar
                             (Common.spf
                                "rule %s: metavariable-pattern failed when \
                                 parsing %s's content as %s: %s"
-                               (fst env.rule.Rule.id :> string)
-                               mvar (Xlang.to_string xlang) msg);
+                               (Rule_ID.to_string (fst env.rule.Rule.id))
+                               mvar
+                               (Analyzer.to_string analyzer)
+                               msg);
                           []
                       | Ok lazy_ast_and_errors ->
-                          let xtarget =
+                          let xtarget : Xtarget.t =
                             {
-                              Xtarget.file = Fpath.v file;
-                              xlang;
+                              path =
+                                {
+                                  origin = File mval_file;
+                                  internal_path_to_content = file;
+                                };
+                              analyzer;
                               lazy_ast_and_errors;
-                              lazy_content = lazy content;
+                              lazy_content = lazy contents;
                             }
                           in
                           (* Persist the bindings from inside the `metavariable-pattern`

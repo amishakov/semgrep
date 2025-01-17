@@ -20,21 +20,11 @@ let pfff_only = ref false
 (* look if identifiers in pattern intersect with file using simple regexps *)
 let filter_irrelevant_patterns = ref false
 
-(* TODO: This was turned off by default in 1.22.0, the matching-cache's code
- * should be removed after a few releases once we confirm that disabling it
- * has no major impact on performance for our community users and customers. *)
-(* opt = optimization *)
-let with_opt_cache = ref false
-
-(* TODO: To be removed with `with_opt_cache` a few releases after 1.22.0. *)
-(* Improves performance on some patterns, degrades performance on others. *)
-let max_cache = ref false
-
 (* Maximum size of a single target file, in bytes (exceptions apply). *)
 let max_target_bytes = ref 5_000_000
 
 (* Maximum number of tainted lvals to save. *)
-let max_tainted_lvals = ref Limits_semgrep.taint_MAX_TAINTED_LVALS
+let max_tainted_vars = ref Limits_semgrep.taint_MAX_TAINTED_VARS
 
 (* Maximum size of the taints set for each lval *)
 let max_taint_set_size = ref Limits_semgrep.taint_MAX_TAINT_SET_SIZE
@@ -53,6 +43,3 @@ let equivalence_mode = ref false
 (* Note that an important flag used during parsing is actually in pfff in
  * Flag_parsing.sgrep_mode
  *)
-
-(* One-off experiment for Raja (See Raja_experiment.ml) *)
-let raja = ref false

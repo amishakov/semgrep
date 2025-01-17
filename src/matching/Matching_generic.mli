@@ -2,15 +2,21 @@
 
 (* incoming environment *)
 type tin = {
-  mv : Metavariable_capture.t;
-  stmts_match_span : Stmts_match_span.t;
-  cache : tout Caching.Cache.t option;
+  mv : Metavariable.bindings;
+  stmts_matched : AST_generic.stmt list;
   (* TODO: this does not have to be in tout; maybe split tin in 2? *)
   lang : Lang.t;
   config : Rule_options.t;
   deref_sym_vals : int;
       (** Counts the number of times that we "follow" symbollically propagated
     * values. This is bound to prevent potential infinite loops. *)
+  wildcard_imports : AST_generic.dotted_ident list;
+      (** Stores the "wildcard imports" that import everything from a given
+          module, but only the ones that occur at the top level of the program
+          being matched. This might change the matching behavior of qualified
+          name patterns, for instance.
+          These look like "from A import *" in Python.
+        *)
 }
 
 (* list of possible outcoming matching environments *)
@@ -50,18 +56,25 @@ val or_list : 'a matcher -> 'a -> 'a list -> tin -> tout
 (* Shortcut for >>=. Since OCaml 4.08, you can define those "extended-let" *)
 val ( let* ) : (tin -> tout) -> (unit -> tin -> tout) -> tin -> tout
 
-val empty_environment :
-  ?mvar_context:Metavariable.bindings option ->
-  tout Caching.Cache.t option ->
-  Lang.t ->
-  Rule_options.t ->
-  tin
+val environment_of_program :
+  Lang.t -> Rule_options.t -> AST_generic.program -> tin
+
+val environment_of_any : Lang.t -> Rule_options.t -> AST_generic.any -> tin
+
+(* This is mostly helpful for Generic_vs_generic, because we want to disable
+   wildcard imports in certain cases (resolved name matching).
+*)
+val wipe_wildcard_imports : (tin -> tout) -> tin -> tout
+
+(* to handle LocalImportAll *)
+val with_additional_wildcard_import :
+  AST_generic.dotted_ident -> (tin -> tout) -> tin -> tout
 
 val add_mv_capture : Metavariable.mvar -> Metavariable.mvalue -> tin -> tin
 
 (* Update the matching list of statements by providing a new matching
    statement. *)
-val extend_stmts_match_span : AST_generic.stmt -> tin -> tin
+val extend_stmts_matched : AST_generic.stmt -> tin -> tin
 
 val envf :
   Metavariable.mvar AST_generic.wrap -> Metavariable.mvalue -> tin -> tout
@@ -103,6 +116,13 @@ val m_option_ellipsis_ok :
 val m_option_none_can_match_some : 'a matcher -> 'a option matcher
 val m_list : ('a, 'b) general_matcher -> ('a list, 'b list) general_matcher
 val m_list_prefix : 'a matcher -> 'a list matcher
+
+(* checks if a is a subsequence (not sublist or subset) of b.
+ * e.g. a = [1; 3] and b = [1; 2; 3] does not fail,
+ * and a = [1; 2] and b = [2; 1] fails
+ *)
+val m_list_subsequence :
+  ('a, 'b) general_matcher -> ('a list, 'b list) general_matcher
 
 (*
    Usage: m_list_with_dots less_is_ok f is_dots list_a list_b
@@ -161,6 +181,7 @@ val m_comb_1toN : ('a -> 'a list -> tin -> tout) -> 'a comb_matcher
 val m_eq : 'a matcher
 val m_bool : bool matcher
 val m_int : int matcher
+val m_parsed_int : Parsed_int.t matcher
 val m_string : string matcher
 val filepath_is_prefix : string -> string -> bool
 val m_filepath_prefix : string matcher

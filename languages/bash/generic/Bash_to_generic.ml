@@ -81,9 +81,6 @@
      metavariable '$XXX'.
 *)
 
-(* Disable warnings against unused variables *)
-[@@@warning "-26-27-32"]
-
 open! Common
 open AST_bash
 module G = AST_generic
@@ -93,6 +90,14 @@ module G = AST_generic
 (*****************************************************************************)
 
 let fb = Tok.unsafe_fake_bracket
+
+(*
+   Convert a pair (loc, x) to a bracket, which uses a leading and trailing
+   token to indicate the location.
+*)
+let bracket (loc : loc) x : 'a bracket =
+  let start, end_ = loc in
+  (start, x, end_)
 
 (* We apply a different mapping whether we're parsing a pattern or target
    program. *)
@@ -107,12 +112,12 @@ let stmt_of_expr loc (e : G.expr) : G.stmt = G.s (G.ExprStmt (e, fst loc))
 let expr_of_stmt (st : G.stmt) : G.expr = G.stmt_to_expr st
 
 let as_stmt : stmt_or_expr -> G.stmt = function
-  | Stmt (loc, st) -> st
+  | Stmt (_loc, st) -> st
   | Expr (loc, e) -> stmt_of_expr loc e
 
 let as_expr : stmt_or_expr -> G.expr = function
-  | Stmt (loc, st) -> expr_of_stmt st
-  | Expr (loc, e) -> e
+  | Stmt (_loc, st) -> expr_of_stmt st
+  | Expr (_loc, e) -> e
 
 let stmt_or_expr_loc = function
   | Stmt (loc, _)
@@ -123,7 +128,7 @@ let block : stmt_or_expr list -> stmt_or_expr = function
   | [ x ] -> x
   | several ->
       let loc = Tok_range.of_list stmt_or_expr_loc several in
-      let stmts = Common.map as_stmt several in
+      let stmts = List_.map as_stmt several in
       Stmt (loc, G.s (G.Block (bracket loc stmts)))
 
 let mk_name (str_wrap : string wrap) : G.name =
@@ -160,7 +165,7 @@ module C = struct
        ${args}
        ${args%.c}
   *)
-  let split loc = mk loc "split"
+  let _split loc = mk loc "split"
 
   (*
      Expand a variable X referenced as $X or ${X} in a program.
@@ -197,14 +202,14 @@ end
    Usage: call C.cmd args
 *)
 let call loc name exprs =
-  G.Call (name loc, bracket loc (Common.map (fun e -> G.Arg e) exprs)) |> G.e
+  G.Call (name loc, bracket loc (List_.map (fun e -> G.Arg e) exprs)) |> G.e
 
 let todo_tokens ((start, end_) : loc) =
   let wrap tok = (Tok.content_of_tok tok, tok) in
   if start =*= end_ then [ G.TodoK (wrap start) ]
   else [ G.TodoK (wrap start); G.TodoK (wrap end_) ]
 
-let todo_stmt (loc : loc) : G.stmt =
+let _todo_stmt (loc : loc) : G.stmt =
   G.s (G.OtherStmt (G.OS_Todo, todo_tokens loc))
 
 let todo_expr (loc : loc) : G.expr =
@@ -217,7 +222,7 @@ let todo_expr2 (loc : loc) : stmt_or_expr = Expr (loc, todo_expr loc)
 (* Converter from bash AST to generic AST *)
 (*****************************************************************************)
 
-let negate_expr (neg_tok : tok) (cmd_loc : loc) (cmd : G.expr) : G.expr =
+let negate_expr (neg_tok : tok) (_cmd_loc : loc) (cmd : G.expr) : G.expr =
   G.opcall (G.Not, neg_tok) [ cmd ]
 
 (*
@@ -230,7 +235,7 @@ let redirect_pipeline_stderr_to_stdout pip =
 let rec blist (env : env) (l : blist) : stmt_or_expr list =
   match l with
   | Seq (_loc, left, right) -> blist env left @ blist env right
-  | Pipelines (_loc, pl) -> Common.map (fun x -> pipeline env x) pl
+  | Pipelines (_loc, pl) -> List_.map (fun x -> pipeline env x) pl
   | Empty _loc -> []
 
 and pipeline (env : env) (x : pipeline) : stmt_or_expr =
@@ -256,14 +261,14 @@ and pipeline (env : env) (x : pipeline) : stmt_or_expr =
       Expr (loc, G.opcall (G.Pipe, bar_tok) [ left; right ])
   | Control_operator (loc, pip, control_op) -> (
       match control_op with
-      | Foreground _, tok -> pipeline env pip
+      | Foreground _, _tok -> pipeline env pip
       | Background, amp_tok ->
           let arg = pipeline env pip |> as_expr in
           Expr (loc, G.opcall (G.Background, amp_tok) [ arg ]))
 
 and cmd_redir (env : env) (x : cmd_redir) : stmt_or_expr =
   (* TODO: don't ignore redirects *)
-  let { loc; command = cmd; redirects } = x in
+  let { loc = _; command = cmd; redirects } = x in
   ignore redirects;
   command env cmd
 
@@ -274,11 +279,12 @@ and cmd_redir (env : env) (x : cmd_redir) : stmt_or_expr =
 *)
 and command (env : env) (cmd : command) : stmt_or_expr =
   match cmd with
-  | Simple_command { loc; assignments; arguments = [] | [ Word ("", _) ] } ->
+  | Simple_command { loc = _; assignments; arguments = [] | [ Word ("", _) ] }
+    ->
       (* TODO: fix the tree-sitter grammar so it doesn't insert a "MISSING"
          node set to the empty string when there's no command following
          multiple assignments. *)
-      Common.map (assignment env) assignments |> block
+      List_.map (assignment env) assignments |> block
   | Simple_command { loc; assignments = _; arguments } -> (
       match arguments with
       | [ (Expr_semgrep_ellipsis tok as e) ] ->
@@ -286,7 +292,7 @@ and command (env : env) (cmd : command) : stmt_or_expr =
       | [ (String_fragment (loc, Frag_semgrep_named_ellipsis _) as e) ] ->
           Expr (loc, expression env e)
       | arguments ->
-          let args = Common.map (expression env) arguments in
+          let args = List_.map (expression env) arguments in
           Expr (loc, call loc C.cmd args))
   | And (loc, left, and_tok, right) ->
       let left = pipeline env left |> as_expr in
@@ -296,18 +302,23 @@ and command (env : env) (cmd : command) : stmt_or_expr =
       let left = pipeline env left |> as_expr in
       let right = pipeline env right |> as_expr in
       Expr (loc, G.opcall (G.Or, or_tok) [ left; right ])
-  | Subshell (loc, (open_, bl, close)) ->
+  | Subshell (loc, (_open_, bl, _close)) ->
       let args = [ stmt_group env loc (blist env bl) |> as_expr ] in
       Expr (loc, call loc C.subshell args)
-  | Command_group (loc, (open_, bl, close)) -> stmt_group env loc (blist env bl)
+  | Command_group (loc, (_open_, bl, _close)) ->
+      stmt_group env loc (blist env bl)
   | Sh_test (loc, _) -> todo_expr2 loc
   | Bash_test (loc, _) -> todo_expr2 loc
   | Arithmetic_expression (loc, _) -> todo_expr2 loc
-  | For_loop (loc, for_, loop_var, opt_in, do_, body, done_) ->
+  | For_loop (loc, for_, loop_var, opt_in, do_, body, _done_) ->
       let header =
-        let values : G.expr list =
+        let in_tk, expr =
           match opt_in with
-          | Some (_in, vals) -> Common.map (fun x -> expression env x) vals
+          | Some (in_tk, vals) ->
+              ( in_tk,
+                G.Container
+                  (List, fb (List_.map (fun x -> expression env x) vals))
+                |> G.e )
           | None ->
               (*
                  Pretend there's a '"$@"', which is semantically correct
@@ -321,14 +332,20 @@ and command (env : env) (cmd : command) : stmt_or_expr =
                 let frag = Expansion (loc, Simple_expansion (loc, var_name)) in
                 String (tok, [ frag ], tok)
               in
-              [ expression env fake_arg_array ]
+              (G.fake "", expression env fake_arg_array)
         in
         match loop_var with
         | Simple_variable_name var
         | Special_variable_name var
         | Var_semgrep_metavar var ->
             let entity = G.basic_entity var in
-            G.ForIn ([ ForInitVar (entity, G.empty_var) ], values)
+            let pat =
+              match entity.name with
+              | EN (Id (id, idinfo)) -> G.PatId (id, idinfo) |> G.p
+              | EPattern pat -> pat
+              | _ -> G.OtherPat (("PatEnt", G.fake "PatEnt"), [ G.En entity ])
+            in
+            G.ForEach (pat, in_tk, expr)
       in
       let body = stmt_group env loc (blist env body) |> as_stmt in
       Stmt (loc, G.For (for_, header, body) |> G.s)
@@ -337,16 +354,16 @@ and command (env : env) (cmd : command) : stmt_or_expr =
   | Select (loc, _select, _loop_var, _opt_in, _do_, body, _done_) ->
       (* TODO *)
       stmt_group env loc (blist env body)
-  | Case (loc, case, subject, in_, clauses, esac) ->
+  | Case (loc, case, subject, _in_, clauses, _esac) ->
       let subject = expression env subject in
       let clauses =
-        Common.map
-          (fun (loc, patterns, paren, stmts, _opt_term) ->
+        List_.map
+          (fun (_loc, patterns, _paren, stmts, _opt_term) ->
             (* TODO: handle the different kinds of terminators. Insert breaks. *)
             let patterns =
-              Common.map
+              List_.map
                 (fun e ->
-                  let tok, _ = expression_loc e in
+                  let tok, _ = AST_bash_loc.expression_loc e in
                   let pat =
                     (* TODO: convert bash expression to generic pattern *)
                     G.OtherPat (("", tok), [ G.E (expression env e) ])
@@ -358,17 +375,18 @@ and command (env : env) (cmd : command) : stmt_or_expr =
           clauses
       in
       Stmt (loc, G.Switch (case, Some (Cond subject), clauses) |> G.s)
-  | If (loc, if_, cond, then_, body, elifs, else_, fi) ->
+  | If (loc, if_, cond, then_, body, elifs, else_, _fi) ->
       let ifs = (loc, if_, cond, then_, body) :: elifs in
       let else_stmt =
         match else_ with
         | None -> None
-        | Some (loc, else_tok, body) -> Some (blist env body |> block |> as_stmt)
+        | Some (_loc, _else_tok, body) ->
+            Some (blist env body |> block |> as_stmt)
       in
       let opt_stmt =
-        List.fold_right
+        List_.fold_right
           (fun if_ (else_stmt : G.stmt option) ->
-            let loc1, if_, cond, then_, body = if_ in
+            let _loc1, if_, cond, _then_, body = if_ in
             (* pad: TODO:  use more complex CondDecl when ready? *)
             let cond_expr = blist env cond |> block |> as_expr in
             let body_stmt = blist env body |> block |> as_stmt in
@@ -381,28 +399,27 @@ and command (env : env) (cmd : command) : stmt_or_expr =
         | Some stmt -> stmt
       in
       Stmt (loc, stmt)
-  | While_loop (loc, while_, cond, do_, body, done_) ->
+  | While_loop (loc, while_, cond, _do_, body, _done_) ->
       let cond = stmt_group env loc (blist env cond) |> as_expr in
       let body = stmt_group env loc (blist env body) |> as_stmt in
       Stmt (loc, G.While (while_, G.Cond cond, body) |> G.s)
-  | Until_loop (loc, until, cond, do_, body, done_) ->
-      let cond_loc = blist_loc cond in
+  | Until_loop (loc, until, cond, _do_, body, _done_) ->
+      let cond_loc = AST_bash_loc.blist_loc cond in
       let neg_cond =
         blist env cond |> stmt_group env loc |> as_expr
         |> negate_expr until cond_loc
       in
       let body = stmt_group env loc (blist env body) |> as_stmt in
       Stmt (loc, G.While (until, G.Cond neg_cond, body) |> G.s)
-  | Coprocess (loc, opt_name, cmd) -> (* TODO: coproc *) command env cmd
+  | Coprocess (_loc, _opt_name, cmd) -> (* TODO: coproc *) command env cmd
   | Assignment ass -> assignment env ass
   | Declaration x ->
-      let loc = x.loc in
-      let assignments = Common.map (assignment env) x.assignments in
+      let assignments = List_.map (assignment env) x.assignments in
       (* TODO: don't ignore the "unknown" arguments that contain variables
          and such. *)
       assignments |> block
   | Negated_command (loc, excl_tok, cmd) ->
-      let cmd_loc = command_loc cmd in
+      let cmd_loc = AST_bash_loc.command_loc cmd in
       let cmd = command env cmd |> as_expr in
       let e = negate_expr excl_tok cmd_loc cmd in
       Expr (loc, e)
@@ -410,7 +427,7 @@ and command (env : env) (cmd : command) : stmt_or_expr =
       let first_tok =
         match def.function_ with
         | Some function_tok -> function_tok
-        | None -> fst (variable_name_loc def.name)
+        | None -> fst (AST_bash_loc.variable_name_loc def.name)
       in
       let def_kind =
         G.FuncDef
@@ -440,8 +457,8 @@ and assignment (env : env) ass =
 (* This returns a Block on purpose e.g. for the body of a 'for' loop, which
    is needed for matching. We can't simplify it into a single expression
    if there's only one statement. *)
-and stmt_group (env : env) (loc : loc) (l : stmt_or_expr list) : stmt_or_expr =
-  let stmts = Common.map as_stmt l in
+and stmt_group (_env : env) (loc : loc) (l : stmt_or_expr list) : stmt_or_expr =
+  let stmts = List_.map as_stmt l in
   let start, end_ = loc in
   Stmt (loc, G.s (G.Block (start, stmts, end_)))
 
@@ -459,8 +476,8 @@ and expression (env : env) (e : expression) : G.expr =
           G.L (G.String (fb wrap)) |> G.e
       | _ ->
           let loc = (open_, close) in
-          Common.map (string_fragment env) frags |> call loc C.quoted_concat)
-  | String_fragment (loc, frag) -> string_fragment env frag
+          List_.map (string_fragment env) frags |> call loc C.quoted_concat)
+  | String_fragment (_loc, frag) -> string_fragment env frag
   | Raw_string (* 'foo' *) (str, tok) ->
       (* normalization to enable matching of e.g. 'foo' against foo *)
       let without_quotes =
@@ -474,27 +491,27 @@ and expression (env : env) (e : expression) : G.expr =
   | Ansii_c_string str -> G.L (G.String (fb str)) |> G.e
   | Special_character str -> G.L (G.String (fb str)) |> G.e
   | Concatenation (loc, el) ->
-      Common.map (expression env) el |> call loc C.concat
+      List_.map (expression env) el |> call loc C.concat
   | Expr_semgrep_ellipsis tok -> G.Ellipsis tok |> G.e
   | Expr_semgrep_deep_ellipsis (_loc, (open_, e, close)) ->
       G.DeepEllipsis (open_, expression env e, close) |> G.e
   | Expr_semgrep_metavar mv -> G.N (mk_name mv) |> G.e
   | Equality_test (loc, _, _) -> (* don't know what this is *) todo_expr loc
   | Empty_expression loc -> G.L (G.String (fb ("", fst loc))) |> G.e
-  | Array (loc, (open_, elts, close)) ->
-      let elts = Common.map (expression env) elts in
+  | Array (_loc, (open_, elts, close)) ->
+      let elts = List_.map (expression env) elts in
       G.Container (G.Array, (open_, elts, close)) |> G.e
-  | Process_substitution (loc, (open_, x, close)) ->
+  | Process_substitution (loc, (_open_, x, _close)) ->
       let arg = blist env x |> block |> as_expr in
       call loc C.proc_subst [ arg ]
 
 and string_fragment (env : env) (frag : string_fragment) : G.expr =
   match frag with
-  | String_content (("...", tok) as wrap) when env =*= Pattern ->
+  | String_content ("...", tok) when env =*= Pattern ->
       (* convert the '...' in '"${foo}...${bar}"' into an ellipsis *)
       G.Ellipsis tok |> G.e
-  | String_content ((_, tok) as wrap) -> G.e (G.L (G.String (fb wrap)))
-  | Expansion (loc, ex) -> expansion env ex
+  | String_content ((_, _tok) as wrap) -> G.e (G.L (G.String (fb wrap)))
+  | Expansion (_loc, ex) -> expansion env ex
   | Command_substitution (open_, x, close) ->
       let loc = (open_, close) in
       let arg = blist env x |> block |> as_expr in
@@ -506,17 +523,21 @@ and string_fragment (env : env) (frag : string_fragment) : G.expr =
    '$' followed by a variable to transform and expand into a list.
    We treat this as a function call.
 *)
-and expansion (env : env) (x : expansion) : G.expr =
+and expansion (_env : env) (x : expansion) : G.expr =
   match x with
   | Simple_expansion (loc, var_name) -> expand loc (mk_var_expr var_name)
-  | Complex_expansion (open_, x, close) -> (
+  | Complex_expansion (_open_, x, _close) -> (
       match x with
       | Variable (loc, var) -> expand loc (mk_var_expr var)
       | Complex_expansion_TODO loc -> todo_expr loc)
 
 and expand loc (var_expr : G.expr) : G.expr = call loc C.expand [ var_expr ]
 
-let program_with_env (env : env) x = blist (env : env) x |> Common.map as_stmt
+let program_with_env (env : env) x = blist (env : env) x |> List_.map as_stmt
+
+(*****************************************************************************)
+(* Entry points *)
+(*****************************************************************************)
 
 (*
    Unwrap the pattern tree as much as possible to maximize matches.
@@ -528,7 +549,7 @@ let program_with_env (env : env) x = blist (env : env) x |> Common.map as_stmt
 *)
 let any (x : blist) =
   let env = Pattern in
-  match blist_as_expression x with
+  match AST_bash_builder.blist_as_expression x with
   | Some e -> G.E (expression env e)
   (* TODO: simply | None -> G.Ss (program env x) but got regressions
    * problem with Parse_pattern.normalize_any probably

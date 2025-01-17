@@ -1,6 +1,6 @@
 (* Yoann Padioleau, Emma Jin
  *
- * Copyright (C) 2020 r2c
+ * Copyright (C) 2020 Semgrep Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
@@ -13,6 +13,7 @@
  * LICENSE for more details.
  *)
 open Common
+open Fpath_.Operators
 open IL
 module G = AST_generic
 module H = AST_generic_helpers
@@ -63,12 +64,11 @@ type env = { facts : Datalog_fact.t list ref }
 (*****************************************************************************)
 (* Helpers *)
 (*****************************************************************************)
-let add env x = Common.push x env.facts
+let add env x = Stack_.push x env.facts
 
 let todo any =
   let s = IL.show_any any in
-  pr2 s;
-  failwith "Datalog_experiment: TODO: IL element not handled (see above)"
+  failwith (spf "Datalog_experiment: IL element not handled: %s" s)
 
 let var_of_name _env name = spf "%s__%s" (fst name.ident) (G.SId.show name.sid)
 let heap_of_int _env (_, tok) = spf "int %s" (Tok.content_of_tok tok)
@@ -82,9 +82,9 @@ let instr env x =
   match x.i with
   | Assign (lval, e) -> (
       match (lval, e.e) with
-      | { base = Var n; rev_offset = [] }, Literal (G.Int s) ->
+      | { base = Var n; rev_offset = [] }, Literal (G.Int pi) ->
           let v = var_of_name env n in
-          let h = heap_of_int env s in
+          let h = heap_of_int env pi in
           add env (D.PointTo (v, h))
       | _ -> todo (I x))
   | _ -> todo (I x)
@@ -106,7 +106,7 @@ let facts_of_function lang def =
 (*****************************************************************************)
 let gen_facts file outdir =
   let ast = Parse_target.parse_program file in
-  let lang = Lang.lang_of_filename_exn (Fpath.v file) in
+  let lang = Lang.lang_of_filename_exn file in
   Naming_AST.resolve lang ast;
 
   (* less: use treesitter also later
@@ -119,11 +119,13 @@ let gen_facts file outdir =
       inherit [_] AST_generic.iter_no_id_info
 
       method! visit_function_definition _env def =
-        Common.push (facts_of_function lang def) facts
+        Stack_.push (facts_of_function lang def) facts
     end
   in
   v#visit_program () ast;
 
-  let facts = !facts |> List.rev |> List.flatten in
-  pr2 (spf "generating %d facts in %s" (List.length facts) outdir);
+  let facts = !facts |> List.rev |> List_.flatten in
+  (* nosemgrep: no-logs-in-library *)
+  Logs.info (fun m ->
+      m "generating %d facts in %s" (List.length facts) !!outdir);
   Datalog_io.write_facts_for_doop facts outdir

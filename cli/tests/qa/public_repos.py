@@ -23,7 +23,8 @@ class Repo(NamedTuple):
 
 
 REPOS = [
-    Repo("https://github.com/apache/airflow"),
+    # FIXME: Syntax errors in typescript. I made a linear task.
+    # Repo("https://github.com/apache/airflow"),
     Repo("https://github.com/coinbase/bifrost"),
     Repo("https://github.com/coinbase/bip38"),
     Repo("https://github.com/coinbase/btcexport"),
@@ -67,7 +68,6 @@ REPOS = [
     Repo("https://github.com/dropbox/dropbox-sdk-python"),
     Repo("https://github.com/dropbox/dropbox_hook"),
     Repo("https://github.com/dropbox/emmer"),
-    Repo("https://github.com/dropbox/firebase-dropbox-oauth"),
     Repo("https://github.com/dropbox/git-rbr"),
     Repo("https://github.com/dropbox/PyHive"),
     Repo("https://github.com/dropbox/goebpf"),
@@ -134,8 +134,14 @@ REPOS = [
     Repo("https://github.com/OWASP/NodeGoat"),
     Repo("https://github.com/dropbox/questions"),
     Repo("https://github.com/coinbase/gtt-ui"),
-    Repo("https://github.com/DevSlop/Pixi"),
-    Repo("https://github.com/home-assistant/home-assistant"),
+    Repo(
+        "https://github.com/DevSlop/Pixi",
+        xfail_reason="DevSlop-Pixi/app/public/api-docs/ contains some minified JS files that cause Semgrep to timeout, so the output will contain some errors.",
+    ),
+    Repo(
+        "https://github.com/home-assistant/home-assistant",
+        xfail_reason="Lack of support for match statement in Python",
+    ),
     Repo("https://github.com/we45/Vulnerable-Flask-App"),
     Repo(
         "https://github.com/draios/sysdig-inspect",

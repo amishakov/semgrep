@@ -1,6 +1,6 @@
 (* Yoann Padioleau
  *
- * Copyright (C) 2019-2023 Semgrep Inc.
+ * Copyright (C) 2019-2024 Semgrep Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
@@ -25,10 +25,10 @@
  *  - Python, Ruby, Lua, Julia, Elixir
  *  - Javascript, Typescript, Vue
  *  - PHP, Hack
- *  - Java, C#, Kotlin
+ *  - Java, Apex, Kotlin, C#
  *  - C, C++
  *  - Go
- *  - Swift
+ *  - Swift, Dart
  *  - OCaml, Scala, Rust
  *  - Clojure, Lisp, Scheme
  *  - R
@@ -37,11 +37,13 @@
  *  - JSON, XML, YAML
  *  - Jsonnet, Terraform
  *  - HTML
- * TODO: SQL, Sqlite, PostgresSQL
+ *  - Promql, CodeQL
+ * TODO: SQL, Sqlite, PostgresSQL, Protobuf
  *
  * See Lang.ml for the list of supported languages.
  * See IL.ml for a generic IL (Intermediate language) better suited for
  * advanced static analysis (e.g., tainted dataflow analysis).
+ * See SAST.ml in pro a simplification of this AST better suited for naming.
  *
  * rational: In the end, programming languages have a lot in Common.
  * Even though some interesting analysis are probably better done on a
@@ -65,6 +67,8 @@
  *    parens around conditions in if). We keep the parens for 'Call'
  *    because we want to get the right range for those so we need the
  *    rightmost tokens in the AST.
+ *    TODO: long term we should not keep any tokens and maintain instead the
+ *    range information in each node (which would be faster and cleaner).
  *  - multiple var declarations in one declaration (e.g., int a,b; in C)
  *    are expanded in multiple 'variable_definition'. Note that
  *    tuple assignments (e.g., a,b=1,2) are not expanded in multiple assigns
@@ -94,7 +98,8 @@
  *
  * Note that this generic AST has become gradually more and more a
  * generic CST, to fix issues in autofix in Semgrep.
- * TODO? it may be time to rename this file CST_generic.ml
+ * TODO? it may be time to rename this file CST_generic.ml (or to remove
+ * all the tokens so we're back to be an AST).
  *
  * related work:
  *  - lib_parsing/ast_fuzzy.ml
@@ -160,6 +165,9 @@
  *    of a VarDef, as done in Python for example).
  *)
 
+(*****************************************************************************)
+(* AST versioning *)
+(*****************************************************************************)
 (* !! Modify version below each time you modify the generic AST!!
  * There are now a few places where we cache the generic AST in a marshalled
  * form on disk (e.g., in src/parsing/Parsing_with_cache.ml) and reading back
@@ -170,10 +178,38 @@
  * convenient to correspond mostly to Semgrep versions. So version below
  * can jump from "1.12.1" to "1.20.0" and that's fine.
  *)
-let version = "1.20.0"
+let version = "1.103.0"
 
-(* Provide hash_* and hash_fold_* for the core ocaml types *)
+(*****************************************************************************)
+(* Some notes on deriving *)
+(*****************************************************************************)
+(* Here are the different 'deriving' we use:
+ *  - 'deriving show' for obviously printing AST constructs
+ *     in debugging statements (very convenient in OCaml given the absence
+ *     of type classes and a generic 'show' function as in Haskell)
+ *  - 'deriving eq' to compare AST constructs, which is
+ *     mostly used in Semgrep for metavariable content comparison, so
+ *     that when one use a pattern like '$X == $X', we make sure the
+ *     AST constructs on the lhs and rhs of '==' contains the same code.
+ *     We actually perform equality "modulo" token location, that is we don't
+ *     consider the token location when performing the equality. See the
+ *     comment about Tok.t_always_equal below
+ * - 'deriving hash' to hash AST constructs. This was used for stmts
+ *    matching caching, but we removed this optimization, but we now
+ *    use AST hashing in Autofix_printer.ASTTable and we also hash
+ *    formulas (which contains patterns, which contains AST_generic constructs)
+ *    in Match_tainting_mode.Formula_tbl
+ * - 'deriving visitors' to generator visitor and mapper boilerplate code
+ *    automatically
+ * - 'deriving sexp' because the Type.t type uses `alternate_name`, and itself
+ *    derives sexp because it is used by semgrep-pro's SIG.type_.
+ *    Since Type.t only uses `alternate_name`, we only need to derive sexp for
+ *    that and related types, and not others like expr, stmt
+ *)
+
+(* Provide hash_* for the core ocaml types *)
 open Ppx_hash_lib.Std.Hash.Builtin
+open Sexplib.Std
 
 (* ppx_hash refuses to hash mutable fields but we do it anyway. *)
 let hash_fold_ref hash_fold_x acc x = hash_fold_x acc !x
@@ -186,23 +222,25 @@ let hash_fold_ref hash_fold_x acc x = hash_fold_x acc !x
  * See Matching_generic.equal_ast_bound_code() and Metavariable.equal_mvalue()
  * for more information.
  *)
-type tok = Tok.t_always_equal [@@deriving show, eq, hash]
+type tok = Tok.t_always_equal [@@deriving show, eq, ord, hash]
 
 (* a shortcut to annotate some information with position information *)
-type 'a wrap = 'a * tok [@@deriving show, eq, hash]
+type 'a wrap = 'a * tok [@@deriving show, eq, ord, hash]
 
 (* Use for round(), square[], curly{}, and angle<> brackets.
  * note: in theory we should not care about those tokens in an AST,
  * but they are useful to report correct ranges in sgrep when we match
  * something that can just be those brackets (e.g., an empty container).
  *)
-type 'a bracket = tok * 'a * tok [@@deriving show, eq, hash]
+type 'a bracket = tok * 'a * tok [@@deriving show, eq, ord, hash]
 
 (* semicolon, a FakeTok in languages that do not require them (e.g., Python).
  * alt: tok option.
+ * TODO: use a tok option, or maybe better is to do like for vtok in
+ * variable_definition and use `sc option` in more places (e.g., ExprStmt)
  * See the sc value also at the end of this file to build an sc.
  *)
-type sc = tok [@@deriving show, eq, hash]
+type sc = tok [@@deriving show, eq, ord, hash]
 
 (* an AST element not yet handled.
  * history: I started by having some precise OtherXxx of other_xxx
@@ -215,20 +253,20 @@ type sc = tok [@@deriving show, eq, hash]
  * is important and require some semantic equivalence in semgrep, then
  * we should support the construct directly, not via an other_xxx.
  *)
-type todo_kind = string wrap [@@deriving show, eq, hash]
+type todo_kind = string wrap [@@deriving show, eq, ord, hash]
 
 (*****************************************************************************)
-(* Names *)
+(* Names part 1 *)
 (*****************************************************************************)
 
-type ident = string wrap [@@deriving show, eq, hash]
+type ident = string wrap [@@deriving show, eq, ord, hash]
 
 (* Usually separated by a '.', but can be used also with '::' separators.
  * less: we often need to get the last elt or adjust the qualifier part,
  * so maybe we should define it as = ident list * ident
  *)
 type dotted_ident = ident list (* at least 1 element *)
-[@@deriving show, eq, hash]
+[@@deriving show, eq, ord, hash]
 
 (* module_name can also be used for a package name or a namespace.
  * TODO? prefix with M and add MQualifiedName for C++?
@@ -240,7 +278,7 @@ type module_name =
    * In C/C++ the string can be <foo.h>.
    *)
   | FileName of string wrap (* ex: Js import, C #include, Go import *)
-[@@deriving show { with_path = false }, eq, hash]
+[@@deriving show { with_path = false }, eq, ord, hash]
 
 (* OCaml has generative functors. This means the types `SId.t` and
    `IdInfoId.t` are different, even though both are represented by ints.
@@ -256,7 +294,7 @@ module IdInfoId = Gensym.MkId ()
  * This single id simplifies further analysis that need to care less about
  * maintaining scoping information, for example to deal with variable
  * shadowing, or functions using the same parameter names
- * (even though you still need to handle specially recursive functions), etc.
+ * (even though you still need to handle specially recursive functions).
  *
  * See Naming_AST.ml for more information.
  *
@@ -295,8 +333,8 @@ and resolved_name_kind =
    * aliased when imported.
    * both dotted_ident must at least contain one element *)
   | ImportedEntity of canonical_name
-  | ImportedModule of
-      canonical_name (* just the DottedName part of module_name*)
+  (* just the DottedName part of module_name *)
+  | ImportedModule of canonical_name
   (* used in Go, where you can pass types as arguments and where we
    * need to resolve those cases
    *)
@@ -327,7 +365,11 @@ and resolved_name_kind =
 and canonical_name = string list
 
 and alternate_name = string list
-[@@deriving show { with_path = false }, eq, hash]
+[@@deriving show { with_path = false }, eq, ord, hash, sexp]
+
+(*****************************************************************************)
+(* Visitor *)
+(*****************************************************************************)
 
 (* Used as a parent class for the autogenerated iter visitor, generated below
  * the large recursive type. *)
@@ -414,11 +456,18 @@ class virtual ['self] iter_parent =
      * visitor. Subclasses can always override these with their own behavior if
      * needed. *)
     method visit_location _env _ = ()
+    method visit_id_flags_t _env _ = ()
     method visit_id_info_id_t _env _ = ()
     method visit_resolved_name _env _ = ()
     method visit_tok _env _ = ()
-    method visit_node_id_t _env _ = ()
-    method visit_string_set_t _env _ = ()
+
+    method visit_parsed_int env pi =
+      Parsed_int.visit
+        (fun tok ->
+          self#visit_tok env tok;
+          tok)
+        pi
+      |> ignore
   end
 
 (* Basically a copy paste of iter_parent above, but with different return types
@@ -480,12 +529,16 @@ class virtual ['self] map_parent =
 
     (* Stubs *)
     method visit_location _env x = x
+    method visit_id_flags_t _env x = x
     method visit_id_info_id_t _env x = x
     method visit_resolved_name _env x = x
     method visit_tok _env x = x
-    method visit_node_id_t _env x = x
-    method visit_string_set_t _env x = x
+    method visit_parsed_int env pi = Parsed_int.map_tok (self#visit_tok env) pi
   end
+
+(*****************************************************************************)
+(* Names part 2 (and start of big mutually recursive types) *)
+(*****************************************************************************)
 
 (* Start of big mutually recursive types because of the use of 'any'
  * in OtherXxx *)
@@ -539,20 +592,38 @@ and qualifier =
 (*****************************************************************************)
 (* Naming/typing *)
 (*****************************************************************************)
-(* The derived equal is overriden for multiple fields of id_info. This is
-   to allow certain modes of equality to ignore id_info when comparing
-   AST nodes. See AST_utils.Syntactic_equal for details *)
 and id_info = {
   id_resolved : resolved_name option ref;
-      [@equal
-        AST_utils.equal_id_info (Common.equal_ref_option equal_resolved_name)]
+  (* List of alternative names, populated when there are multiple
+     candidates available (not including `id_resolved` itself) for the
+     identifier (e.g., resolving virtual fields of the interface in
+     Java); otherwise, it remains empty.
+
+     TODO We could merge `id_resolved` and `id_resolved_alternatives`.
+     Keeping them separate might help distinguish a preferred name
+     from other possible candidates. However, since we currently don’t
+     have any features that prioritize findings based on probability,
+     this distinction isn’t particularly useful at the moment. *)
+  id_resolved_alternatives : resolved_name list ref;
   (* variable tagger (naming) *)
   (* sgrep: in OCaml we also use that to store the type of
    * a typed entity, which can be interpreted as a TypedMetavar in semgrep.
    * alt: have an explicity type_ field in entity.
+   * NOTE on 'equal': We do not need `id_type`, 'id_resolved' is all we
+   *   need to determine whether two ids are the same. The same id should not
+   *   have two different types. And... there is a bug in Naming_SAST that
+   *   may be assigning a fresh SId.t to type ids, thus making equality fail
+   *   sometimes when comparing two identical ids. So e.g. a rule matching
+   *   `Foo $FOO` and `$FOO.bar()` may not work on this code:
+   *
+   *       Foo foo;
+   *       ...
+   *       foo.bar();
+   *
+   *   because the first `foo` has type `Foo` but that `Foo` has SId.t "n",
+   *   whereas the second `foo` has type `Foo` but with SId.t "m".
    *)
-  id_type : type_ option ref;
-      [@equal AST_utils.equal_id_info (Common.equal_ref_option equal_type_)]
+  id_type : type_ option ref; [@hash.ignore] [@equal fun _a _b -> true]
   (* type checker (typing) *)
   (* sgrep: this is for sgrep constant propagation hack.
    * todo? associate only with Id?
@@ -561,34 +632,20 @@ and id_info = {
    * meaning the same variable might have different id_svalue value
    * depending where it is used.
    *)
-  id_svalue : svalue option ref; [@equal fun _a _b -> true]
-  (* THINK: Drop option? *)
-  (* id_hidden=true must be set for any artificial identifier that never
-     appears in source code but is introduced in the AST after parsing.
-
-     Don't use this for syntax desugaring or transpilation because the
-     resulting function name might exist in some source code. Consider the
-     following normalization:
-
-       !foo -> foo.contents
-                   ^^^^^^^^
-                 should not be marked as hidden because it could appear
-                 in target source code.
-
-     However, an artificial identifier like "!sh_quoted_expand!" should
-     be marked as hidden in bash.
-
-     This allows not breaking the -fast/-filter_irrelevant_rules optimization
-     that skips a target file if some identifier in the pattern AST doesn't
-     exist in the source of the target.
-  *)
-  id_hidden : bool; [@equal AST_utils.equal_id_info (fun a b -> a = b)]
-  (* this is used by Naming_X in deep-semgrep *)
-  id_info_id : id_info_id; [@equal fun _a _b -> true]
+  id_svalue : svalue option ref; [@hash.ignore] [@equal fun _a _b -> true]
+  (* ^^^ THINK: Drop option? *)
+  (* See module 'IdFlags'. Previously we compared 'id_flags' with 'IdFlags.equal'
+   * but, once we added the 'final' flag which is only set at definition site,
+   * the same identifier can now have different flags. In fact we did not really
+   * have to compare 'id_flags' anyways. *)
+  id_flags : id_flags ref; [@hash.ignore] [@equal fun _a _b -> true]
+  (* this is used by Naming_SAST in semgrep-pro *)
+  id_info_id : id_info_id; [@hash.ignore] [@equal fun _a _b -> true]
 }
 
-(* See explanation for @name where the visitors are generated at the end of this
- * long recursive type. *)
+(* See explanation for @name where the visitors are generated at the end of
+ * this long recursive type. *)
+and id_flags = (IdFlags.t[@name "id_flags_t"])
 and id_info_id = (IdInfoId.t[@name "id_info_id_t"])
 
 (*****************************************************************************)
@@ -604,7 +661,26 @@ and expr = {
   (* used to quickly get the range of an expression *)
   mutable e_range : (Tok.location * Tok.location) option;
       [@equal fun _a _b -> true] [@hash.ignore]
+  (* whether this expression is implicitly a return value in a function *)
+  mutable is_implicit_return : bool; [@hash.ignore]
+  (* known truths about this expression derived from the cfg for when.
+   * for example, a fact of foo() in the expression
+   *
+   * if (x == 0) {
+   *    foo();
+   * }
+   *
+   * is x == 0. this field is used for implementing when/ pattern-when
+   * (now part of comparison), a feature to add path sensitivity to semgrep.
+   *
+   * making facts opaque here to prevent slowing down tests that prints
+   * expressions for debugging purposes.
+   *)
+  mutable facts : facts; [@equal fun _a _b -> true] [@hash.ignore] [@opaque]
 }
+
+and fact = Equal of name * expr | NotEqual of name * expr
+and facts = fact list
 
 and expr_kind =
   (* basic (atomic) values *)
@@ -638,6 +714,13 @@ and expr_kind =
    * how user think.
    *)
   | Constructor of name * expr list bracket
+  (* see also New(...) for other values *)
+  | N of name
+  | IdSpecial of special wrap
+  (* operators and function application *)
+  | Call of expr * arguments
+  (* IntepolatedString of expr list is simulated with a
+   * Call(IdSpecial (Concat ...)) *)
   (* Regexp templates are interpolated strings. Constant regexps aren't
      represented here but under 'literal' so as to benefit from constant
      propagation. This is meant to be similar to how string literals
@@ -651,12 +734,6 @@ and expr_kind =
      - semgrep metavariable ($X and $...X)
   *)
   | RegexpTemplate of expr bracket (* // *) * string wrap option (* modifiers *)
-  (* see also New(...) for other values *)
-  | N of name
-  | IdSpecial of
-      special wrap (*e: [[AST_generic.expr]] other identifier cases *)
-  (* operators and function application *)
-  | Call of expr * arguments
   (* 'type_' below is usually a TyN or TyArray (or TyExpr).
    * 'id_info' refers to the constructor.
    * Note that certain languages do not have a 'new' keyword
@@ -670,8 +747,6 @@ and expr_kind =
   (* TODO? Separate regular Calls from OpCalls where no need bracket and Arg *)
   (* (XHP, JSX, TSX), could be transpiled also (done in IL.ml?) *)
   | Xml of xml
-  (* IntepolatedString of expr list is simulated with a
-   * Call(IdSpecial (Concat ...)) *)
   (* The left part should be an lvalue (Id, DotAccess, ArrayAccess, Deref)
    * but it can also be a pattern (Container, even Record), but
    * you should really use LetPattern for that.
@@ -691,7 +766,7 @@ and expr_kind =
   (* less: could desugar in Assign, should be only binary_operator *)
   | AssignOp of expr * operator wrap * expr
   (* newvar:! newscope:? in OCaml yes but we miss the 'in' part here  *)
-  | LetPattern of pattern * expr (*e: [[AST_generic.expr]] other assign cases *)
+  | LetPattern of pattern * expr
   (* can be used for Record, Class, or Module access depending on expr.
    * In the last case it should be rewritten as a (N IdQualified) with a
    * qualifier though.
@@ -740,6 +815,10 @@ and expr_kind =
      Revisit when symbolic propagation is more stable
   *)
   | Alias of string wrap * expr
+  (* For local open in OCaml, as in `let open Foo in` or the more
+   * recent Foo.(...) and Foo.[...]
+   *)
+  | LocalImportAll of module_name * tok (* '.' or 'let' *) * expr
   (* sgrep: ... in expressions, args, stmts, items, and fields
    * (and unfortunately also in types in Python) *)
   | Ellipsis of tok (* '...' *)
@@ -768,9 +847,8 @@ and expr_kind =
    * StmtExpr above to wrap stmt if it's not an expr but a stmt
    *)
   | OtherExpr of todo_kind * any list
-  (* experimental alternative to OtherExpr. This allows us to have
-     proper exprs, stmts, etc. embedded in constructs that were not
-     fully translated into the generic AST. *)
+  (* Embed an untranslated or partially translated subtree generated
+     by ocaml-tree-sitter *)
   | RawExpr of raw_tree
 
 and literal =
@@ -779,7 +857,9 @@ and literal =
    * may not be able to represent all numbers. For example, OCaml integers
    * are limited to 63 bits, but C integers can use 64 bits.
    *)
-  | Int of int option wrap
+  (* See explanation for @name where the visitors are generated at the end of
+     * this long recursive type. *)
+  | Int of (Parsed_int.t[@name "parsed_int"])
   | Float of float option wrap
   | Char of string wrap
   (* String literals:
@@ -892,6 +972,8 @@ and special =
   | Super (* called 'base' in C# *)
   (* less: how different self/parent is from this/super? *)
   | Self
+  (* like `cls` in Python, which indicates the type, not the instance *)
+  | Cls
   | Parent
   (* for Lua, todo: just remove it, create Dict without key *)
   | NextArrayIndex
@@ -1017,6 +1099,13 @@ and operator =
   (* Shell & and | *)
   | Background
   | Pipe
+  (* Circom Signal Assignments
+   * L = left, D = double, S = single, A = Arrow
+   *)
+  | LDA (* <== *)
+  | RDA (* ==> *)
+  | LSA (* <-- *)
+  | RSA (* --> *)
 
 (* '++', '--' *)
 and incr_decr = Incr | Decr
@@ -1060,8 +1149,11 @@ and xml = {
 }
 
 and xml_kind =
-  | XmlClassic of tok (*'<'*) * ident * tok (*'>'*) * tok (*'</foo>'*)
-  | XmlSingleton of tok (*'<'*) * ident * tok (* '/>', with xml_body = [] *)
+  (* <foo>...</foo>
+   * Name instead of id + info because Foo.Bar is valid in JS, maybe others. *)
+  | XmlClassic of tok (*'<'*) * name * tok (*'>'*) * tok (*'</foo>'*)
+  (* <foo/> *)
+  | XmlSingleton of tok (*'<'*) * name * tok (* '/>', with xml_body = [] *)
   (* React/JS specific *)
   | XmlFragment of tok (* '<>' *) * (* '</>', with xml_attrs = [] *) tok
 
@@ -1077,7 +1169,8 @@ and xml_attribute =
 and a_xml_attr_value = expr
 
 and xml_body =
-  (* sgrep-ext: can contain "...". The string can also contain multiple lines *)
+  (* sgrep-ext: can contain "...". The string can also contain multiple
+     lines and so-called entities such as "&lt;" *)
   | XmlText of string wrap
   (* this can be None when people abuse {} to put comments in it *)
   | XmlExpr of expr option bracket
@@ -1112,48 +1205,18 @@ and argument =
 (* NOTE: We used to have a Bloom filter optimization that annotated statements
  * with the strings occurring in it, for which we had a `s_strings` mutable
  * field here. We disabled this optimization in 0.116.0 after realizing that it
- * (no longer?) had a meaningful effect on performance. (And because it hadtricky
- * interactions with const-prop and sym-prop, see #4670, and PA-1920 / PR #6179.)
+ * had a meaningful effect on performance. (and because it had tricky
+ * interactions with const-prop and sym-prop, see #4670, and PA-1920/PR-#6179)
  * Finally, Bloom-filter's code was removed in 1.22.0, and paradoxically, that
  * made Semgrep noticeably faster (an average of 1.35x on a set of 9 repos) on
  * our stress-test-monorepo benchmark. *)
 and stmt = {
-  s : stmt_kind;
-      [@equal AST_utils.equal_stmt_field_s equal_stmt_kind] [@hash.ignore]
-  (* this can be used to compare and hash more efficiently stmts,
-   * or in semgrep to quickly know if a stmt is a children of another stmt.
-   *)
-  s_id : AST_utils.Node_ID.t;
-      [@equal AST_utils.equal_stmt_field_s_id] [@name "node_id_t"]
+  s : stmt_kind; [@hash.ignore]
   (* todo? we could store a range: (tok * tok) to delimit the range of a stmt
    * which would allow us to remove some of the extra 'tok' in stmt_kind.
    * Indeed, the main use of those 'tok' is to accurately report a match range
    * in semgrep.
    *)
-  mutable s_use_cache : bool; [@equal fun _a _b -> true] [@hash.ignore]
-  (* whether this is a strategic point for match result caching.
-     This field is relevant for patterns only.
-
-     This applies to the caching optimization, in which the results of
-     matching lists of statements can be cached. A list of statements
-     is identified by its leading node. In the current implementation,
-     the fields 's_id', 's_use_caching', and 's_backrefs' are treated as
-     properties of a (non-empty) list of statements, rather than of individual
-     statements. A cleaner implementation would consist of a custom
-     list type in which each list has these properties, including the
-     empty list.
-  *)
-  mutable s_backrefs : (AST_utils.String_set.t[@name "string_set_t"]) option;
-      [@equal fun _a _b -> true] [@hash.ignore]
-  (* set of metavariables referenced in the "rest of the pattern", as
-     determined by matching order.
-     This field is relevant for patterns only.
-
-     This is used to determine which of the bound
-     metavariables should be added to the cache key for this node.
-     This field is set on pattern ASTs only, in a pass right after parsing
-     and before matching.
-  *)
   (* used to quickly get the range of a statement *)
   mutable s_range : (Tok.location * Tok.location) option;
       [@equal fun _a _b -> true] [@hash.ignore]
@@ -1191,7 +1254,14 @@ and stmt_kind =
   | Goto of tok * label * sc (* less: use label_ident for computed goto in C*)
   (* TODO? move in expr! in C++ the expr can be an option *)
   | Throw of tok (* 'raise' in OCaml, 'throw' in Java/PHP *) * expr * sc
-  | Try of tok * stmt * catch list * finally option
+  | Try of
+      tok (* 'try' *)
+      * stmt (* body of the try clause *)
+      * catch list (* list of exception handlers *)
+      * try_else option
+      (* optional else block that executes when no exception is thrown *)
+      * finally option
+    (* optional finally block that executes at the end no matter what *)
   | WithUsingResource of
       tok (* 'with' in Python, 'using' in C# *)
       * stmt list (* resource acquisition *)
@@ -1216,6 +1286,9 @@ and stmt_kind =
    * of relying that the any list contains at least one token
    *)
   | OtherStmt of other_stmt_operator * any list
+  (* Embed an untranslated or partially translated subtree generated
+     by ocaml-tree-sitter *)
+  | RawStmt of raw_tree
 
 (* TODO: can also introduce var in some languages
  * less: factorize with for_var_or_expr
@@ -1227,7 +1300,7 @@ and condition =
 
 (* newscope: *)
 (* less: could merge even more with pattern
- * list = PatDisj and Default = PatUnderscore,
+ * list = PatDisj and Default = PatWildcard,
  * so case_and_body of Switch <=> action of MatchPattern
  *)
 and case_and_body =
@@ -1240,7 +1313,7 @@ and case_and_body =
  *)
 and case =
   | Case of tok * pattern
-  (* less: could unsugar as Case (PatUnderscore _) *)
+  (* less: could unsugar as Case (PatWildcard _) *)
   | Default of tok
   (* For Go, expr can contain some Assign bindings.
    * todo? could merge with regular Case? can 'case x := <-chan' be
@@ -1264,6 +1337,8 @@ and catch_exn =
   | CatchParam of parameter_classic
   (* e.g., CatchEmpty/CatchParams in Solidity *)
   | OtherCatch of todo_kind * any list
+
+and try_else = tok * stmt
 
 (* ptype should never be None *)
 
@@ -1289,9 +1364,6 @@ and for_header =
   | ForEach of for_each
   (* Scala *)
   | MultiForEach of multi_for_each list
-  (* Lua. todo: merge with ForEach? *)
-  (* pattern 'in' expr *)
-  | ForIn of for_var_or_expr list (* init *) * expr list
   (* sgrep: *)
   | ForEllipsis of (* ... *) tok
 
@@ -1308,7 +1380,8 @@ and multi_for_each =
 and for_var_or_expr =
   (* newvar: *)
   | ForInitVar of entity * variable_definition
-  (* less: should rename ForInitAssign really *)
+  (* Note that the expr can contain Ellipsis
+   * less: should rename ForInitAssign really *)
   | ForInitExpr of expr
 
 and other_stmt_with_stmt_operator =
@@ -1325,11 +1398,13 @@ and other_stmt_with_stmt_operator =
   | OSWS_Else_in_try
   (* C/C++/cpp *)
   | OSWS_Iterator
+  (* Microsoft-specific C/C++ extension for Structured Exception Handling *)
+  | OSWS_SEH
   (* e.g., Case/Default outside of switch in C/C++, StmtTodo in C++ *)
   | OSWS_Todo
 
 and other_stmt_operator =
-  (* Python *)
+  (* Python, C++ *)
   | OS_Delete
   (* todo: reduce? transpile? *)
   | OS_ForOrElse
@@ -1339,6 +1414,9 @@ and other_stmt_operator =
   | OS_ThrowNothing
   | OS_ThrowArgsLocation
   | OS_Pass
+  (* TODO: OS_Async should be a 'other_stmt_with_stmt_operator' !
+   * See comment attached to 'OtherStmt' re 'stmt's not being allowed
+   * in the arguments. *)
   | OS_Async
   (* C/C++ *)
   | OS_Asm
@@ -1362,7 +1440,7 @@ and other_stmt_operator =
 (* Pattern *)
 (*****************************************************************************)
 (* This is quite similar to expr. A few constructs in expr have
-* equivalent here prefixed with Pat (e.g., PaLiteral, PatId). We could
+ * equivalent here prefixed with Pat (e.g., PaLiteral, PatId). We could
  * maybe factorize with expr, and this may help semgrep, but I think it's
  * cleaner to have a separate type because the scoping rules for a pattern and
  * an expr are quite different and not any expr is allowed here.
@@ -1382,8 +1460,8 @@ and pattern =
   (* less: generalize to other container_operator? *)
   | PatList of pattern list bracket
   | PatKeyVal of pattern * pattern (* a kind of PatTuple *)
-  (* special case of PatId, TODO: name PatAny *)
-  | PatUnderscore of tok
+  (* special case of PatId e.g. `_` in OCaml and Scala, `...` in C++ *)
+  | PatWildcard of tok
   (* OCaml and Scala *)
   | PatDisj of pattern * pattern (* also abused for catch in Java *)
   | PatTyped of pattern * type_
@@ -1585,7 +1663,7 @@ and entity = {
    *)
   name : entity_name;
   attrs : attribute list;
-  tparams : type_parameters;
+  tparams : type_parameters option;
 }
 
 (* old: used to be merged with field_name in a unique name_or_dynamic
@@ -1636,7 +1714,7 @@ and definition_kind =
   | ModuleDef of module_definition
   | MacroDef of macro_definition
   (* in a header file (e.g., .mli in OCaml or 'module sig') *)
-  | Signature of type_
+  | Signature of signature_definition
   (* Only used inside a function.
    * Needed for languages without local VarDef (e.g., Python/PHP)
    * where the first use is also its declaration. In that case when we
@@ -1675,8 +1753,8 @@ and type_parameter_classic = {
   tp_variance : variance wrap option;
 }
 
-(* TODO bracket *)
-and type_parameters = type_parameter list
+(* bracket is usually '<>' for C++/.., '()' for OCaml, '[]' for Scala *)
+and type_parameters = type_parameter list bracket
 
 (* less: have also Invariant? *)
 and variance =
@@ -1794,6 +1872,14 @@ and variable_definition = {
   vinit : expr option;
   (* less: (tok * expr) option? *)
   vtype : type_ option;
+  (* Note that this is None for most languages. Even in C-like languages, this
+   * is also often None because one statement can contain multiple definitions
+   * as in `int a, b = 1, c;` but there is just one semicolon. We could use
+   * the ',' for the other declarations but anyway to be really correct we would
+   * need to change the `entity x VarDef` in an `entities x VarDefs` which is a
+   * complex refactoring.
+   *)
+  vtok : sc option;
 }
 
 (* ------------------------------------------------------------------------- *)
@@ -1893,7 +1979,7 @@ and class_kind =
   | Class (* or Struct for C/Solidity *)
   | Interface (* abused for Contract in Solidity *)
   | Trait
-  (* Kotlin/Scala *)
+  (* Kotlin/Scala/OCaml *)
   | Object
 
 (* A parent can have arguments in Scala/Java/Kotlin (because constructors
@@ -1936,6 +2022,15 @@ and module_definition_kind =
  *)
 and macro_definition = { macroparams : ident list; macrobody : any list }
 
+(* ------------------------------------------------------------------------- *)
+(* Signature definition *)
+(* ------------------------------------------------------------------------- *)
+and signature_definition = {
+  (* ex: 'val' in OCaml *)
+  sig_tok : tok;
+  sig_type : type_;
+}
+
 (*****************************************************************************)
 (* Directives (Module import/export, package) *)
 (*****************************************************************************)
@@ -1963,12 +2058,14 @@ and directive_kind =
          * those documented in #5305 and #6532. Removing this desugaring lets us
          * match, for example, a pattern and a target which import the same
          * things but in a different order. *)
-      * (ident * alias option (* as name alias *)) list
+      * import_from_kind list
   | ImportAs of tok * module_name * alias option (* as name *)
   (* Bad practice! hard to resolve name locally.
-   * We use ImportAll for C/C++ #include and C++ 'using namespace'.
+   * We use ImportAll for C/C++ '#include', C++ 'using namespace', wildcard
+   * imports in Java, 'open' in OCaml, etc.
    * The last tok is '.' in Go, '*' in Java/Python, '_' in Scala, and a fake
    * token in C++ 'using namespace std;'.
+   * See also LocalImportAll in the expr type.
    *)
   | ImportAll of tok * module_name * tok
   (* packages are different from modules in that multiple files can reuse
@@ -1990,6 +2087,14 @@ and directive_kind =
 
 (* xxx as name *)
 and alias = ident * id_info
+
+and import_from_kind =
+  (* non-aliased import, like Python `from a import b` *)
+  | Direct of alias
+  (* import which is aliased into a different name, like Python
+     `from a import b as c`
+  *)
+  | Aliased of ident * alias
 
 (*****************************************************************************)
 (* Toplevel *)
@@ -2081,6 +2186,7 @@ and raw_tree = (any Raw_tree.t[@name "raw_tree_t"])
 [@@deriving
   show { with_path = false },
     eq,
+    ord,
     hash,
     (* Autogenerated visitors:
      * http://gallium.inria.fr/~fpottier/visitors/manual.pdf
@@ -2119,9 +2225,14 @@ let error tok msg = raise (Error (msg, tok))
 let fake s = Tok.unsafe_fake_tok s
 
 (* bugfix: I used to put ";" but now Parse_info.str_of_info prints
- * the string of a fake info
+ * the string of a fake info.
+ * TODO: try to put back ";", but in many languages like Python we still use
+ * G.sc even if we know there is no semicolon, so for those we need to refactor
+ * the code to use G.no_sc instead
+ * TODO: factorize with Tok.unsafe_sc
  *)
-let sc = Tok.unsafe_fake_tok ""
+let sc : Tok.t = Tok.unsafe_fake_tok ""
+let no_sc : Tok.t option = None
 
 (*****************************************************************************)
 (* AST builder helpers *)
@@ -2133,17 +2244,17 @@ let sc = Tok.unsafe_fake_tok ""
 (* ------------------------------------------------------------------------- *)
 
 (* statements *)
-let s skind =
-  {
-    s = skind;
-    s_id = AST_utils.Node_ID.mk ();
-    s_use_cache = false;
-    s_backrefs = None;
-    s_range = None;
-  }
+let s skind = { s = skind; s_range = None }
 
 (* expressions *)
-let e ekind = { e = ekind; e_id = 0; e_range = None }
+let e ekind =
+  {
+    e = ekind;
+    e_id = 0;
+    e_range = None;
+    is_implicit_return = false;
+    facts = [];
+  }
 
 (* directives *)
 let d dkind = { d = dkind; d_attrs = [] }
@@ -2160,43 +2271,44 @@ let p x = x
 (* Ident and names *)
 (* ------------------------------------------------------------------------- *)
 
-(* For Naming_SAST.ml in deep-semgrep.
+(* For Naming_SAST.ml in semgrep-pro.
  * This can be reseted to 0 before parsing each file, or not. It does
  * not matter as the couple (filename, id_info_id) is unique.
  *)
 let id_info_id = IdInfoId.mk
-let empty_var = { vinit = None; vtype = None }
+let empty_var = { vinit = None; vtype = None; vtok = no_sc }
 
-let empty_id_info ?(hidden = false) () =
+let empty_id_info ?(hidden = false) ?(case_insensitive = false)
+    ?(id = id_info_id ()) () =
   {
     id_resolved = ref None;
+    id_resolved_alternatives = ref [];
     id_type = ref None;
     id_svalue = ref None;
-    id_hidden = hidden;
-    id_info_id = id_info_id ();
+    id_flags =
+      ref (IdFlags.make ~hidden ~case_insensitive ~final:false ~static:false);
+    id_info_id = id;
   }
 
 let basic_id_info ?(hidden = false) resolved =
-  {
-    id_resolved = ref (Some resolved);
-    id_type = ref None;
-    id_svalue = ref None;
-    id_hidden = hidden;
-    id_info_id = id_info_id ();
-  }
+  let id_info = empty_id_info ~hidden () in
+  id_info.id_resolved := Some resolved;
+  id_info
+
+let is_case_insensitive info = IdFlags.is_case_insensitive !(info.id_flags)
 
 (* TODO: move AST_generic_helpers.name_of_id and ids here *)
 
-let dotted_to_canonical xs = Common.map fst xs
-let canonical_to_dotted tid xs = xs |> Common.map (fun s -> (s, tid))
+let dotted_to_canonical xs = List_.map fst xs
+let canonical_to_dotted tid xs = xs |> List_.map (fun s -> (s, tid))
 
 (* ------------------------------------------------------------------------- *)
 (* Entities *)
 (* ------------------------------------------------------------------------- *)
 
 (* alt: could use @@deriving make *)
-let basic_entity ?hidden ?(attrs = []) ?(tparams = []) id =
-  let idinfo = empty_id_info ?hidden () in
+let basic_entity ?hidden ?case_insensitive ?(attrs = []) ?tparams id =
+  let idinfo = empty_id_info ?hidden ?case_insensitive () in
   { name = EN (Id (id, idinfo)); attrs; tparams }
 
 (* ------------------------------------------------------------------------- *)
@@ -2210,17 +2322,16 @@ let arg e = Arg e
 (* Expressions *)
 (* ------------------------------------------------------------------------- *)
 let special spec es =
-  Call (IdSpecial spec |> e, Tok.unsafe_fake_bracket (es |> Common.map arg))
-  |> e
+  Call (IdSpecial spec |> e, Tok.unsafe_fake_bracket (es |> List_.map arg)) |> e
 
 let opcall (op, tok) exprs : expr = special (Op op, tok) exprs
 
 let string_ (lquote, xs, rquote) : string wrap bracket =
-  let s = xs |> Common.map fst |> String.concat "" in
+  let s = xs |> List_.map fst |> String.concat "" in
   let t =
     match xs with
     | [] -> Tok.fake_tok lquote ""
-    | (_, t) :: ys -> Tok.combine_toks t (Common.map snd ys)
+    | (_, t) :: ys -> Tok.combine_toks t (List_.map snd ys)
   in
   (lquote, (s, t), rquote)
 
@@ -2229,7 +2340,7 @@ let string_ (lquote, xs, rquote) : string wrap bracket =
  *)
 let interpolated (lquote, xs, rquote) =
   match xs with
-  | [ Common.Left3 (str, tstr) ] ->
+  | [ Either_.Left3 (str, tstr) ] ->
       L (String (lquote, (str, tstr), rquote)) |> e
   | __else__ ->
       let special = IdSpecial (ConcatString InterpolatedConcat, lquote) |> e in
@@ -2237,16 +2348,16 @@ let interpolated (lquote, xs, rquote) =
         ( special,
           ( lquote,
             xs
-            |> Common.map (function
-                 | Common.Left3 x ->
+            |> List_.map (function
+                 | Either_.Left3 x ->
                      Arg (L (String (Tok.unsafe_fake_bracket x)) |> e)
-                 | Common.Right3 (lbrace, eopt, rbrace) ->
+                 | Either_.Right3 (lbrace, eopt, rbrace) ->
                      let special =
                        IdSpecial (InterpolatedElement, lbrace) |> e
                      in
-                     let args = eopt |> Option.to_list |> Common.map arg in
+                     let args = eopt |> Option.to_list |> List_.map arg in
                      Arg (Call (special, (lbrace, args, rbrace)) |> e)
-                 | Common.Middle3 e -> Arg e),
+                 | Either_.Middle3 e -> Arg e),
             rquote ) )
       |> e
 
@@ -2254,14 +2365,20 @@ let interpolated (lquote, xs, rquote) =
 let keyval k _tarrow v =
   Container (Tuple, Tok.unsafe_fake_bracket [ k; v ]) |> e
 
-let raw x = RawExpr x |> e
+(* Embed untranslated (raw) nodes into the AST *)
+let expr_of_raw (x : any Raw_tree.t) : expr = RawExpr x |> e
+let stmt_of_raw (x : any Raw_tree.t) : stmt = RawStmt x |> s
+
+(* Embed proper AST nodes into an untranslated subtree *)
+let raw_of_expr (x : expr) : any Raw_tree.t = Any (E x)
+let raw_of_stmt (x : stmt) : any Raw_tree.t = Any (S x)
 
 (* ------------------------------------------------------------------------- *)
 (* Parameters *)
 (* ------------------------------------------------------------------------- *)
 
 (* alt: could use @@deriving make *)
-let param_of_id ?(pattrs = []) ?(ptype = None) ?(pdefault = None) id =
+let param_of_id ?(pattrs = []) ?ptype ?pdefault id =
   {
     pname = Some id;
     pdefault;
@@ -2270,7 +2387,7 @@ let param_of_id ?(pattrs = []) ?(ptype = None) ?(pdefault = None) id =
     pinfo = basic_id_info (Parameter, SId.unsafe_default);
   }
 
-let param_of_type ?(pattrs = []) ?(pdefault = None) ?(pname = None) typ =
+let param_of_type ?(pattrs = []) ?pdefault ?pname typ =
   {
     ptype = Some typ;
     pname;
@@ -2290,8 +2407,8 @@ let ty_builtin id = TyN (Id (id, empty_id_info ())) |> t
 (* ------------------------------------------------------------------------- *)
 (* Type parameters *)
 (* ------------------------------------------------------------------------- *)
-let tparam_of_id ?(tp_attrs = []) ?(tp_variance = None) ?(tp_bounds = [])
-    ?(tp_default = None) tp_id =
+let tparam_of_id ?(tp_attrs = []) ?tp_variance ?(tp_bounds = []) ?tp_default
+    tp_id =
   TP { tp_id; tp_attrs; tp_variance; tp_bounds; tp_default }
 
 (* ------------------------------------------------------------------------- *)
@@ -2327,11 +2444,11 @@ let stmt1 xs =
 (* this should be simpler at some point if we get rid of FieldStmt *)
 let fld (ent, def) = F (s (DefStmt (ent, def)))
 
-let basic_field id vopt typeopt =
+let basic_field ?(vtok = no_sc) id vopt typeopt =
   let entity = basic_entity id in
-  fld (entity, VarDef { vinit = vopt; vtype = typeopt })
+  fld (entity, VarDef { vinit = vopt; vtype = typeopt; vtok })
 
-let fieldEllipsis t = F (exprstmt (e (Ellipsis t)))
+let field_ellipsis t = F (exprstmt (e (Ellipsis t)))
 
 (* ------------------------------------------------------------------------- *)
 (* Attributes *)
@@ -2347,7 +2464,7 @@ let unhandled_keywordattr (s, t) =
 (* Patterns *)
 (* ------------------------------------------------------------------------- *)
 
-let case_of_pat_and_expr ?(tok = None) (pat, expr) =
+let case_of_pat_and_expr ?tok (pat, expr) =
   let tok =
     match tok with
     | None -> fake "case"
@@ -2355,7 +2472,7 @@ let case_of_pat_and_expr ?(tok = None) (pat, expr) =
   in
   CasesAndBody ([ Case (tok, pat) ], exprstmt expr)
 
-let case_of_pat_and_stmt ?(tok = None) (pat, stmt) =
+let case_of_pat_and_stmt ?tok (pat, stmt) =
   let tok =
     match tok with
     | None -> fake "case"
@@ -2384,12 +2501,7 @@ let special_multivardef_pattern = "!MultiVarDef!"
 (* Semgrep hacks *)
 (*****************************************************************************)
 
-(* !!You should not use the function below!! You should use instead
- * Metavars_generic.is_metavar_name. If you use the function below,
- * it probably means you have an ugly dependency to semgrep that you
- * should not have.
- * coupling: Metavariable.is_metavar_name
- *)
+(* coupling: Metavariable.is_metavar_name *)
 let is_metavar_name s = Common.( =~ ) s "^\\(\\$[A-Z_][A-Z_0-9]*\\)$"
 
 (* coupling: Metavariable.is_metavar_ellipsis *)
@@ -2408,6 +2520,22 @@ class virtual ['self] iter_no_id_info =
   object (_self : 'self)
     inherit ['self] iter
     method! visit_id_info _env _info = ()
+
+    (* In many cases, it is also undesirable to recurse into fact(s). This is
+     * because facts of an expression e contains expressions that might not be
+     * subexpressions of e, and we don't want to visit those fact expressions
+     * when visiting a particular expression.
+     *
+     * e.g. if we have the following code, f() will have the fact
+     * x == 0. However, x == 0 is not a subexpression of f() and we don't want
+     * to visit x == 0 when visiting f().
+     *
+     * if (x == 0) {
+     *   f();
+     * }
+     *)
+    method! visit_fact _env _fact = ()
+    method! visit_facts _env _facts = ()
   end
 
 (* This is based on the legacy behavior of Map_AST.mk_visitor (look through the

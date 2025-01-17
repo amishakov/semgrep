@@ -25,8 +25,8 @@ open Common
  * Semgrep (especially in the ocamllex/menhir-based parsers).
  *
  * Note that those exns can be converted in Semgrep_error_code.error with
- * Semgrep_error_code.try_with_exn_to_error()
- * coupling: Semgrep_error_code.exn_to_error()
+ * Core_error.exn_to_error()
+ * coupling: Core_error.exn_to_error()
  *
  * related code:
  *  - Semgrep_output_v1.core_error_kind
@@ -56,10 +56,10 @@ exception Other_error of string * Tok.t
 (*****************************************************************************)
 
 (* val lexical_error : string -> Lexing.lexbuf -> unit *)
-let lexical_error s lexbuf =
+let lexical_error msg lexbuf =
   let info = Tok.tok_of_lexbuf lexbuf in
-  if !Flag_parsing.exn_when_lexical_error then raise (Lexical_error (s, info))
-  else if !Flag_parsing.verbose_lexing then Common.pr2_once ("LEXER: " ^ s)
+  if !Flag_parsing.exn_when_lexical_error then raise (Lexical_error (msg, info))
+  else if !Flag_parsing.verbose_lexing then UCommon.pr2_once ("LEXER: " ^ msg)
   else ()
 
 (****************************************************************************)
@@ -85,7 +85,7 @@ let shorten_string s =
 let show_token_value (x : Tok.t) : string =
   match x with
   | OriginTok loc -> spf "%S" (shorten_string loc.str)
-  | FakeTokStr (fake, _opt_loc) -> spf "fake %S" (shorten_string fake)
+  | FakeTok (fake, _opt_loc) -> spf "fake %S" (shorten_string fake)
   | ExpandedTok (first_loc, _) ->
       (* not sure about this *)
       spf "%S" (shorten_string first_loc.str)
@@ -109,5 +109,6 @@ let string_of_exn e =
       Some (spf "Parsing_error.Other_error (%s, %s)" msg (p tok))
   | _ -> None
 
-(* val register_exception_printer : unit -> unit *)
-let register_exception_printer () = Printexc.register_printer string_of_exn
+(* It's appropriate to register the exception printers here because they
+   were freshly defined and nobody expects other printers to be active. *)
+let () = Printexc.register_printer string_of_exn

@@ -78,7 +78,7 @@ let run_all ~search_param ~debug ~force ~warn ~comment_style patterns docs :
   let skipped = ref [] in
   let matches =
     docs
-    |> Common.map_filter
+    |> List_.filter_map
          (fun (get_doc_src : ?max_len:int -> unit -> Src_file.t) ->
            let matches, run_time =
              Match.timef (fun () ->
@@ -134,7 +134,7 @@ let run_all ~search_param ~debug ~force ~warn ~comment_style patterns docs :
                        Match.timef (fun () -> parse_doc comment_style doc_src)
                      in
                      let matches_in_file =
-                       Common.mapi
+                       List_.mapi
                          (fun pat_id (pat_src, pat) ->
                            if debug then
                              printf
@@ -170,11 +170,33 @@ let run_all ~search_param ~debug ~force ~warn ~comment_style patterns docs :
     num_matching_files = !num_matching_files;
   }
 
+(*
+   Exit the process after the specified timeout (in seconds).
+*)
+let exit_after ?stderr_msg ~duration exit_code =
+  (*
+     Warning: the signal handler executes asynchronously, much like a thread.
+     Don't use printf or other functions that are not thread-safe.
+  *)
+  let write_msg =
+    match stderr_msg with
+    | None -> fun () -> ()
+    | Some msg ->
+        let msg = Bytes.of_string msg in
+        fun () -> ignore (Unix.write Unix.stderr msg 0 (Bytes.length msg))
+  in
+  let handler _signal =
+    write_msg ();
+    exit exit_code
+  in
+  Sys.set_signal Sys.sigalrm (Sys.Signal_handle handler);
+  ignore (Unix.alarm duration)
+
 let apply_timeout config =
   match config.timeout with
   | None -> ()
   | Some duration ->
-      Timeout.exit_after ~stderr_msg:"\ntimeout\n" ~duration timeout_exit_code
+      exit_after ~stderr_msg:"\ntimeout\n" ~duration timeout_exit_code
 
 let run config =
   apply_timeout config;
@@ -183,8 +205,8 @@ let run config =
     (match config.pattern with
     | None -> []
     | Some pat_str -> [ Src_file.of_string pat_str ])
-    @ Common.map Src_file.of_file pattern_files
-    |> Common.map (fun pat_src ->
+    @ List_.map Src_file.of_file pattern_files
+    |> List_.map (fun pat_src ->
            (pat_src, parse_pattern config.comment_style pat_src))
   in
   let patterns, errors =
@@ -208,9 +230,7 @@ let run config =
         ]
     | roots ->
         let files = Find_files.list roots in
-        Common.map
-          (fun file ?max_len () -> Src_file.of_file ?max_len file)
-          files
+        List_.map (fun file ?max_len () -> Src_file.of_file ?max_len file) files
   in
   let debug = config.debug in
   if debug then Match.debug := true;
@@ -233,7 +253,7 @@ let run config =
   in
   (match config.output_format with
   | Text ->
-      Match.print_nested_results ~with_time:config.time ~highlight matches
+      Print_match.print_nested_results ~with_time:config.time ~highlight matches
         errors);
   if debug then (
     printf "\nanalyzed %i files out of %i\n" num_analyzed num_files;
@@ -467,10 +487,9 @@ let man =
     `S Manpage.s_description;
     `P "Match a pattern against an arbitrary program read from stdin.";
     `S Manpage.s_authors;
-    `P "Martin Jambon <martin@returntocorp.com>";
+    `P "Martin Jambon <martin@semgrep.com>";
     `S Manpage.s_bugs;
-    `P
-      "Check out bug reports at https://github.com/returntocorp/semgrep/issues.";
+    `P "Check out bug reports at https://github.com/semgrep/semgrep/issues.";
     `S Manpage.s_see_also;
     `P "semgrep, spacecat";
   ]

@@ -1,6 +1,6 @@
 (* Yoann Padioleau
  *
- * Copyright (C) 2021 R2C
+ * Copyright (C) 2021 Semgrep Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
@@ -14,8 +14,7 @@
  *)
 open Token_scala
 module PI = Lib_ast_fuzzy
-
-let logger = Logging.get_logger [ __MODULE__ ]
+module Log = Log_parser_scala.Log
 
 (*****************************************************************************)
 (* Token Helpers *)
@@ -64,7 +63,7 @@ let visitor_info_of_tok f = function
   | ID_UPPER (s, ii) -> ID_UPPER (s, f ii)
   | ID_BACKQUOTED (s, ii) -> ID_BACKQUOTED (s, f ii)
   | OP (s, ii) -> OP (s, f ii)
-  | IntegerLiteral (x, ii) -> IntegerLiteral (x, f ii)
+  | IntegerLiteral pi -> IntegerLiteral (Parsed_int.map_tok f pi)
   | FloatingPointLiteral (x, ii) -> FloatingPointLiteral (x, f ii)
   | CharacterLiteral (x, ii) -> CharacterLiteral (x, f ii)
   | BooleanLiteral (x, ii) -> BooleanLiteral (x, f ii)
@@ -203,7 +202,7 @@ let inFirstOfStat x =
   | DEDENT _ ->
       false
   | _ ->
-      logger#info "inFirstOfStat: true for %s" (Dumper.dump x);
+      Log.debug (fun m -> m "inFirstOfStat: true for %s" (Dumper.dump x));
       true
 
 (** Can token end a statement? *)
@@ -240,7 +239,7 @@ let inLastOfStat x =
   (* semgrep-ext: *)
   | Ellipsis _
   | RDots _ ->
-      logger#info "inLastOfStat: true for %s" (Dumper.dump x);
+      Log.debug (fun m -> m "inLastOfStat: true for %s" (Dumper.dump x));
       true
   | _ -> false
 

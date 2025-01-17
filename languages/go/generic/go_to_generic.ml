@@ -13,6 +13,7 @@
  * LICENSE for more details.
  *)
 open Common
+open Either_
 open Ast_go
 module G = AST_generic
 module H = AST_generic_helpers
@@ -30,7 +31,7 @@ module H = AST_generic_helpers
 (*****************************************************************************)
 let id x = x
 let string = id
-let list = Common.map
+let list = List_.map
 let option = Option.map
 let either = OCaml.map_of_either
 let arithmetic_operator = id
@@ -64,7 +65,7 @@ let return_type_of_results results =
       Some
         (G.TyTuple
            (xs
-           |> Common.map (function
+           |> List_.map (function
                 | G.Param { G.ptype = Some t; _ } -> t
                 | G.Param { G.ptype = None; _ } -> raise Impossible
                 | G.ParamEllipsis t -> G.TyEllipsis t |> G.t
@@ -186,12 +187,15 @@ let top_func () =
         | None -> G.Param pclassic
         | Some tok -> G.ParamRest (tok, pclassic))
   and struct_field (v1, v2) =
-    let v1 = struct_field_kind v1 and _v2TODO = option tag v2 in
-    v1
-  and struct_field_kind = function
+    let attrs = option tag v2 |> Option.value ~default:[] in
+    struct_field_kind attrs v1
+  and struct_field_kind attrs = function
     | Field (v1, v2) ->
-        let v1 = ident v1 and v2 = type_ v2 in
-        G.basic_field v1 None (Some v2)
+        let id = ident v1 and vtype = Some (type_ v2) in
+        let entity =
+          G.{ name = EN (Id (id, empty_id_info ())); attrs; tparams = None }
+        in
+        G.(fld (entity, VarDef { vinit = None; vtype; vtok = no_sc }))
     | EmbeddedField (v1, v2) ->
         let _v1TODO = option tok v1 and v2 = qualified_ident v2 in
         let name = name_of_qualified_ident v2 in
@@ -199,8 +203,10 @@ let top_func () =
         let e = G.special spec [ G.N name |> G.e ] in
         let st = G.exprstmt e in
         G.F st
-    | FieldEllipsis t -> G.fieldEllipsis t
-  and tag v = wrap string v
+    | FieldEllipsis t -> G.field_ellipsis t
+  and tag v =
+    let attr = G.(E (e (L (String (fb v))))) in
+    [ G.OtherAttribute (("GoTag", snd v), [ attr ]) ]
   and interface_field = function
     | Method (v1, v2) ->
         let v1 = ident v1 in
@@ -217,7 +223,7 @@ let top_func () =
         let e = G.special spec [ G.N name |> G.e ] in
         let st = G.exprstmt e in
         G.F st
-    | FieldEllipsis2 t -> G.fieldEllipsis t
+    | FieldEllipsis2 t -> G.field_ellipsis t
     | Constraints xs -> (
         match xs with
         | [] -> raise Impossible
@@ -226,6 +232,26 @@ let top_func () =
             let st = G.OtherStmt (G.OS_Todo, [ G.T ty ]) |> G.s in
             G.F st)
   and expr_or_type v = either expr type_ v
+  (* used for translating call make/call new *)
+  and gen_new ty (l, args, r) t name =
+    let return (ty, args) =
+      G.New (fake t name, ty, G.empty_id_info (), (l, args, r))
+    in
+    let args = arguments args in
+    (* this translation (esp for make) depends on the first argument,
+     * where
+     *)
+    match ty with
+    (* the first arg is indeed a type *)
+    | ArgType ty -> return (type_ ty, args)
+    (* metavar *)
+    | Arg (Id v1) -> return (G.TyN (G.Id (v1, G.empty_id_info ())) |> G.t, args)
+    (* ... *)
+    | Arg (Ellipsis tok) ->
+        return (G.TyEllipsis tok |> G.t, G.Arg (G.Ellipsis tok |> G.e) :: args)
+    (* exp *)
+    | Arg exp -> return (G.TyExpr (expr exp) |> G.t, args)
+    | ArgDots _ -> raise Impossible
   and expr e =
     (match e with
     | DotAccessEllipsis (v1, v2) ->
@@ -248,13 +274,10 @@ let top_func () =
      * x :  tau = make(tau)
      * and other sem(grep)antic information is useful for future analysis.
      *)
-    | Call (Id ("new", t), None, (l, [ ArgType ty ], r)) ->
-        G.Ref
-          ( fake t "new",
-            G.New (fake t "new", type_ ty, G.empty_id_info (), (l, [], r))
-            |> G.e )
-    | Call (Id ("make", t), None, (l, [ ArgType ty ], r)) ->
-        G.New (fake t "make", type_ ty, G.empty_id_info (), (l, [], r))
+    | Call (Id ("new", t), None, (l, [ ty ], r)) ->
+        G.Ref (fake t "new", gen_new ty (l, [], r) t "new" |> G.e)
+    | Call (Id ("make", t), None, (l, ty :: args, r)) ->
+        gen_new ty (l, args, r) t "make"
     | Call v1 ->
         let e, args = call_expr v1 in
         G.Call (e, args)
@@ -280,8 +303,7 @@ let top_func () =
         and v2, tok = wrap arithmetic_operator v2
         and v3 = expr v3 in
         G.Call
-          ( G.IdSpecial (G.Op v2, tok) |> G.e,
-            fb ([ v1; v3 ] |> Common.map G.arg) )
+          (G.IdSpecial (G.Op v2, tok) |> G.e, fb ([ v1; v3 ] |> List_.map G.arg))
     | CompositeLit (v1, v2) ->
         let v1 = type_ v1
         and l, v2, r = bracket (list init_for_composite_lit) v2 in
@@ -327,9 +349,7 @@ let top_func () =
           ("ParenType should disappear" ^ Dumper.dump v1))
     |> G.e
   and literal = function
-    | Int v1 ->
-        let v1 = wrap id v1 in
-        G.Int v1
+    | Int v1 -> G.Int v1
     | Float v1 ->
         let v1 = wrap id v1 in
         G.Float v1
@@ -421,7 +441,7 @@ let top_func () =
         G.Call (G.IdSpecial (G.IncrDecr (v2, v3), tok) |> G.e, fb [ G.Arg v1 ])
         |> G.e
   (* invariant: you should not use 'list stmt', but instead always
-   * use list stmt_aux ... |> List.flatten
+   * use list stmt_aux ... |> List_.flatten
    *)
   and stmt x = G.stmt1 (stmt_aux x)
   and stmt_aux = function
@@ -441,7 +461,7 @@ let top_func () =
         let v1 = list decl v1 in
         v1
     | Block (t1, v1, t2) ->
-        let v1 = list stmt_aux v1 |> List.flatten in
+        let v1 = list stmt_aux v1 |> List_.flatten in
         [ G.Block (t1, v1, t2) |> G.s ]
     | Empty -> [ G.Block (fb []) |> G.s ]
     | SimpleStmt v1 ->
@@ -538,12 +558,12 @@ let top_func () =
         and v3 = expr v3 in
         match opt with
         | None ->
-            let pattern = G.PatUnderscore (fake v2 "_") in
+            let pattern = G.PatWildcard (fake v2 "_") in
             G.ForEach (pattern, v2, v3)
         | Some (xs, _tokEqOrColonEqTODO) ->
             let pattern =
               G.PatTuple
-                (xs |> Common.map H.expr_to_pattern |> Tok.unsafe_fake_bracket)
+                (xs |> List_.map H.expr_to_pattern |> Tok.unsafe_fake_bracket)
             in
             G.ForEach (pattern, v2, v3))
   and case_clause = function
@@ -562,12 +582,12 @@ let top_func () =
         | Right t -> G.PatType t)
   and case_kind = function
     | CaseExprs (tok, v1) ->
-        v1 |> Common.map (fun x -> G.Case (tok, expr_or_type_to_pattern x))
+        v1 |> List_.map (fun x -> G.Case (tok, expr_or_type_to_pattern x))
     | CaseAssign (tok, v1, v2, v3) ->
         let v1 = list expr_or_type v1 and v3 = expr v3 in
         let v1 =
           v1
-          |> Common.map (function
+          |> List_.map (function
                | Left e -> e
                | Right _ -> error tok "TODO: Case Assign with Type?")
         in
@@ -592,36 +612,36 @@ let top_func () =
         let ent =
           G.basic_entity v1 ~attrs:[ G.attr G.Const (fake (snd v1) "const") ]
         in
-        G.DefStmt (ent, G.VarDef { G.vinit = v3; vtype = v2 }) |> G.s
+        G.DefStmt (ent, G.VarDef { G.vinit = v3; vtype = v2; vtok = G.no_sc })
+        |> G.s
     | DVar (v1, v2, v3) ->
         let v1 = ident v1 and v2 = option type_ v2 and v3 = option expr v3 in
         let ent =
           G.basic_entity v1 ~attrs:[ G.attr G.Var (fake (snd v1) "var") ]
         in
-        G.DefStmt (ent, G.VarDef { G.vinit = v3; vtype = v2 }) |> G.s
+        G.DefStmt (ent, G.VarDef { G.vinit = v3; vtype = v2; vtok = G.no_sc })
+        |> G.s
     | DTypeAlias (v1, v2, v3) ->
         let v1 = ident v1 and _v2 = tok v2 and v3 = type_ v3 in
         let ent = G.basic_entity v1 in
         G.DefStmt (ent, G.TypeDef { G.tbody = G.AliasType v3 }) |> G.s
     | DTypeDef (v1, v2, v3) ->
         let id = ident v1 in
-        let tparams = option type_parameters v2 |> Common.optlist_to_list in
+        let tparams = option type_parameters v2 in
         let ty = type_ v3 in
-        let ent = G.basic_entity id ~tparams in
+        let ent = G.basic_entity id ?tparams in
         G.DefStmt (ent, G.TypeDef { G.tbody = G.NewType ty }) |> G.s
-  and type_parameters v : G.type_parameters =
-    let _, xs, _ = bracket (list type_parameter) v in
-    xs
+  and type_parameters v : G.type_parameters = bracket (list type_parameter) v
   and type_parameter v : G.type_parameter =
     let p = parameter_binding v in
     G.OtherTypeParam (("Param", G.fake ""), [ G.Pa p ])
   and top_decl = function
     | DFunc (v1, v2, (v3, v4)) ->
         let v1 = ident v1 in
-        let tparams = option type_parameters v2 |> Common.optlist_to_list in
+        let tparams = option type_parameters v2 in
         let ftok, params, ret = func_type v3 in
         let body = stmt v4 in
-        let ent = G.basic_entity v1 ~tparams in
+        let ent = G.basic_entity v1 ?tparams in
         G.DefStmt
           ( ent,
             G.FuncDef
@@ -724,13 +744,13 @@ let top_func () =
       (* not used anymore, Items is now used for sgrep *)
       | Ss v1 ->
           let v1 = list stmt_aux v1 in
-          G.Ss (List.flatten v1)
+          G.Ss (List_.flatten v1)
       | Item v1 ->
           let v1 = item v1 in
           G.S v1
       | Items v1 ->
           let v1 = list item_aux v1 in
-          G.Ss (List.flatten v1)
+          G.Ss (List_.flatten v1)
     in
     res
   in

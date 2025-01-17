@@ -37,7 +37,7 @@ def login() -> NoReturn:
     """
     state = get_state()
     saved_login_token = auth._read_token_from_settings_file()
-    if saved_login_token:
+    if saved_login_token and saved_login_token != state.env.app_token:
         click.echo(
             f"API token already exists in {state.settings.path}. To login with a different token logout use `semgrep logout`"
         )
@@ -62,7 +62,8 @@ def login() -> NoReturn:
     click.echo(
         "Login enables additional proprietary Semgrep Registry rules and running custom policies from Semgrep Cloud Platform."
     )
-    click.echo(f"Login at: {url}")
+    click.echo(f"Opening login at: {url}")
+    click.launch(url)
     click.echo(
         "\nOnce you've logged in, return here and you'll be ready to start using new Semgrep rules."
     )
@@ -72,6 +73,12 @@ def login() -> NoReturn:
     for _ in range(MAX_RETRIES):
         r = state.app_session.post(
             f"{state.env.semgrep_url}/api/agent/tokens/requests",
+            headers={
+                "User-Agent": str(state.app_session.user_agent),
+                "X-Semgrep-Client-Id": str(
+                    state.settings.get("anonymous_user_id") or ""
+                ),
+            },
             json={"token_request_key": str(session_id)},
         )
         if r.status_code == 200:
@@ -82,14 +89,14 @@ def login() -> NoReturn:
                 sys.exit(FATAL_EXIT_CODE)
         elif r.status_code != 404:
             click.echo(
-                f"Unexpected failure from {state.env.semgrep_url}: status code {r.status_code}; please contact support@r2c.dev if this persists",
+                f"Unexpected failure from {state.env.semgrep_url}: status code {r.status_code}; please contact support@semgrep.com if this persists",
                 err=True,
             )
 
         time.sleep(WAIT_BETWEEN_RETRY_IN_SEC)
 
     click.echo(
-        f"Failed to login: please check your internet connection or contact support@r2c.dev",
+        f"Failed to login: please check your internet connection or contact support@semgrep.com",
         err=True,
     )
     sys.exit(FATAL_EXIT_CODE)
@@ -109,13 +116,3 @@ def save_token(login_token: Optional[str], echo_token: bool) -> bool:
     else:
         click.echo("Login token is not valid. Please try again.", err=True)
         return False
-
-
-@click.command()
-@handle_command_errors
-def logout() -> None:
-    """
-    Remove locally stored credentials to semgrep.dev
-    """
-    auth.delete_token()
-    click.echo("Logged out (log back in with `semgrep login`)")

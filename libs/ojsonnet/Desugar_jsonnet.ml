@@ -1,6 +1,6 @@
 (* Yoann Padioleau
  *
- * Copyright (C) 2022 r2c
+ * Copyright (C) 2022 Semgrep Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
@@ -13,7 +13,7 @@
  * LICENSE for more details.
  *)
 open Common
-open File.Operators
+open Fpath_.Operators
 open AST_jsonnet
 module C = Core_jsonnet
 
@@ -42,13 +42,13 @@ module C = Core_jsonnet
  * registry (e.g., local x = import 'p/python').
  *)
 type import_callback =
-  Common.filename (* a directory *) -> string -> AST_jsonnet.expr option
+  string (* a directory *) -> string -> AST_jsonnet.expr option
 
 let default_callback _ _ = None
 
 type env = {
   (* like in Python jsonnet binding, "the base is the directly of the file" *)
-  base : Common.filename; (* a directory *)
+  base : string; (* a directory *)
   import_callback : import_callback;
   (* TODO: cache_file
    * The cache_file is used to ensure referencial transparency (see the spec
@@ -87,15 +87,13 @@ let freshvar =
     incr store;
     ("!tmp" ^ string_of_int !store, fk)
 
-let todo _env _v = failwith "TODO"
-
 (*****************************************************************************)
 (* Builtins *)
 (*****************************************************************************)
 
 (* todo? auto generate the right name in otarzan? *)
 let desugar_string _env x = x
-let desugar_list f env x = x |> Common.map (fun x -> f env x)
+let desugar_list f env x = x |> List_.map (fun x -> f env x)
 
 (*****************************************************************************)
 (* Boilerplate *)
@@ -121,7 +119,8 @@ let desugar_ident env v : C.ident = (desugar_wrap desugar_string) env v
 let rec desugar_expr env v : C.expr =
   try desugar_expr_aux env v with
   | Failure "TODO" ->
-      pr2 (spf "TODO: construct not handled:\n %s" (show_expr v));
+      (* nosemgrep: no-logs-in-library *)
+      Logs.debug (fun m -> m "construct not handled:\n %s" (show_expr v));
       failwith "TODO:desugar"
 
 and desugar_expr_aux env v =
@@ -378,7 +377,7 @@ and desugar_obj_inside env (l, v, r) : C.expr =
   | Object v ->
       let binds, asserts, fields =
         v
-        |> Common.partition_either3 (function
+        |> Either_.partition_either3 (function
              | OLocal (_tlocal, x) -> Left3 x
              | OEllipsis tk ->
                  error tk "OEllipsis can appear only in semgrep patterns"
@@ -386,18 +385,19 @@ and desugar_obj_inside env (l, v, r) : C.expr =
              | OField x -> Right3 x)
       in
       let binds =
-        if env.within_an_object then binds
+        if env.within_an_object || not !Conf_ojsonnet.implement_dollar then
+          binds
         else binds @ [ B (("$", fk), fk, IdSpecial (Self, fk)) ]
       in
       let asserts' =
         asserts
-        |> Common.map (fun assert_ -> desugar_assert_ env (assert_, binds))
+        |> List_.map (fun assert_ -> desugar_assert_ env (assert_, binds))
       in
       let fields' =
-        fields |> Common.map (fun field -> desugar_field env (field, binds))
+        fields |> List_.map (fun field -> desugar_field env (field, binds))
       in
       let obj = C.Object (asserts', fields') in
-      if env.within_an_object then
+      if env.within_an_object && !Conf_ojsonnet.implement_self then
         C.Local
           ( fk,
             [
@@ -424,7 +424,7 @@ and desugar_assert_ (env : env) (v : assert_ * bind list) : C.obj_assert =
 
 and desugar_field (env : env) (v : field * bind list) : C.field =
   let { fld_name; fld_attr; fld_hidden; fld_value = e' }, binds = v in
-  let fld_name = desugar_field_name env fld_name in
+  let fld_name_desugared = desugar_field_name env fld_name in
   let fld_hidden = (desugar_wrap desugar_hidden) env fld_hidden in
   let fld_value =
     desugar_expr
@@ -432,8 +432,25 @@ and desugar_field (env : env) (v : field * bind list) : C.field =
       (Local (fk, binds, fk, e'))
   in
   match fld_attr with
-  | None -> { C.fld_name; fld_hidden; fld_value }
-  | Some (PlusField _) -> todo env "PlusField"
+  | None -> { C.fld_name = fld_name_desugared; fld_hidden; fld_value }
+  | Some (PlusField _) ->
+      let name =
+        match fld_name with
+        | FId ident ->
+            let id = desugar_ident env ident in
+            let str = mk_str_literal id in
+            L str
+        | FStr str -> L (Str str)
+        | FDynamic (_, p, _) -> p
+      in
+
+      let index = desugar_expr env name in
+      let obj = C.IdSpecial (Super, fk) in
+
+      let rhs = C.ArrayAccess (obj, (fk, index, fk)) in
+
+      let new_fld_value = C.BinaryOp (rhs, (C.Plus, fk), fld_value) in
+      { C.fld_name = fld_name_desugared; fld_hidden; fld_value = new_fld_value }
 
 and desugar_field_name env v =
   match v with
@@ -476,7 +493,7 @@ and desugar_import env v : C.expr =
       let final_path = Filename.concat env.base str in
       if not (Sys.file_exists final_path) then
         error tk (spf "file does not exist: %s" final_path);
-      let s = Common.read_file final_path in
+      let s = UFile.Legacy.read_file final_path in
       C.L (mk_str_literal (s, tk))
 
 (*****************************************************************************)
@@ -485,8 +502,8 @@ and desugar_import env v : C.expr =
 
 let desugar_expr_profiled env e = desugar_expr env e [@@profiling]
 
-let desugar_program ?(import_callback = default_callback) ?(use_std = true)
-    (file : Fpath.t) (e : program) : C.program =
+let desugar_program ?(import_callback = default_callback) (file : Fpath.t)
+    (e : program) : C.program =
   let env =
     {
       within_an_object = false;
@@ -494,11 +511,8 @@ let desugar_program ?(import_callback = default_callback) ?(use_std = true)
       import_callback;
     }
   in
-  (* TODO: skipped for now because std.jsonnet contains too many complicated
-   * things we don't handle, and it actually does not even parse right now.
-   *)
   let e =
-    if use_std then
+    if !Conf_ojsonnet.use_std then
       let std = Std_jsonnet.get_std_jsonnet () in
       (* 'local std = e_std; e' *)
       Local (fk, [ B (("std", fk), fk, std) ], fk, e)

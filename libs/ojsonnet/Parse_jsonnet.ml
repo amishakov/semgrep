@@ -38,13 +38,8 @@ let loc_of_tree_sitter_error (err : Tree_sitter_run.Tree_sitter_error.t) =
   {
     Tok.str = err.substring;
     pos =
-      {
-        charpos = 0;
-        (* fake *)
-        line = start.row + 1;
-        column = start.column;
-        file = err.file.name;
-      };
+      Pos.make (Fpath.v err.file.name) ~line:(start.row + 1) (* fake *)
+        ~column:start.column 0;
   }
 
 let exn_of_loc loc =
@@ -59,8 +54,12 @@ let error_of_tree_sitter_error (err : Tree_sitter_run.Tree_sitter_error.t) =
 (* Entry point *)
 (*****************************************************************************)
 
+let jsonnet_parser_ref :
+    (Fpath.t -> (AST_jsonnet.expr, unit) Tree_sitter_run.Parsing_result.t) ref =
+  ref (fun _file -> failwith "internal error: jsonnet parser not initialized")
+
 let parse_program (file : Fpath.t) : AST_jsonnet.program =
-  let res = Parse_jsonnet_tree_sitter.parse file in
+  let res = !jsonnet_parser_ref file in
   (* similar to Parse_target.run_parser and the TreeSitter case *)
   match (res.program, res.errors) with
   | Some ast, [] -> ast

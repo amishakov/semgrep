@@ -1,6 +1,5 @@
-open File.Operators
-
-let logger = Logging.get_logger [ __MODULE__ ]
+open Fpath_.Operators
+module Log = Log_paths.Log
 
 (*************************************************************************)
 (* Prelude *)
@@ -18,7 +17,7 @@ let logger = Logging.get_logger [ __MODULE__ ]
 
 let with_dir_handle path func =
   let dir = Unix.opendir !!path in
-  Fun.protect ~finally:(fun () -> Unix.closedir dir) (fun () -> func dir)
+  Common.protect ~finally:(fun () -> Unix.closedir dir) (fun () -> func dir)
 
 (* Read the names found in a directory, excluding "." and "..". *)
 let read_dir_entries path =
@@ -38,6 +37,8 @@ let read_dir_entries path =
         | End_of_file -> List.rev acc
       in
       loop [])
+
+let read_dir_entries_fpath path = read_dir_entries path |> List_.map Fpath.v
 
 let rec iter_dir_entries func dir names =
   List.iter (iter_dir_entry func dir) names
@@ -74,13 +75,13 @@ let fold_left func init path =
 let list_with_stat path =
   fold_left (fun acc path stat -> (path, stat) :: acc) [] path |> List.rev
 
-let list path = list_with_stat path |> Common.map fst
+let list path = list_with_stat path |> List_.map fst
 
 (* python: Target.files_from_filesystem *)
 let list_regular_files ?(keep_root = false) root_path =
   list_with_stat root_path
-  |> Common.map_filter (fun (path, (stat : Unix.stats)) ->
-         logger#info "root: %s path: %s" !!root_path !!path;
+  |> List_.filter_map (fun (path, (stat : Unix.stats)) ->
+         Log.debug (fun m -> m "root: %s path: %s" !!root_path !!path);
          if keep_root && path = root_path then Some path
          else
            match stat.st_kind with

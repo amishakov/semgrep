@@ -81,7 +81,7 @@ let mk_trees h xs =
   (* filter comment tokens *)
   let xs =
     xs
-    |> Common.exclude (fun t ->
+    |> List_.exclude (fun t ->
            let kind = h.kind t in
            match kind with
            | Esthet _
@@ -144,13 +144,13 @@ let mk_trees h xs =
   and split_comma xs =
     let rec aux acc xs =
       match xs with
-      | [] -> if null acc then [] else [ Left (acc |> List.rev) ]
+      | [] -> if List_.null acc then [] else [ Either.Left (acc |> List.rev) ]
       | x :: xs -> (
           match x with
           | Ast_fuzzy.Tok (",", info) ->
               let before = acc |> List.rev in
-              if null before then aux [] xs
-              else Left before :: Right info :: aux [] xs
+              if List_.null before then aux [] xs
+              else Either.Left before :: Either.Right info :: aux [] xs
           | _ -> aux (x :: acc) xs)
     in
     aux [] xs
@@ -158,7 +158,7 @@ let mk_trees h xs =
   aux xs
 
 let mk_tokens hooks toks =
-  toks |> List.map (fun tok -> (hooks.kind tok, hooks.tokf tok))
+  toks |> List_.map (fun tok -> (hooks.kind tok, hooks.tokf tok))
 
 (*****************************************************************************)
 (* Visitor *)
@@ -239,7 +239,7 @@ let (mk_mapper : map_visitor -> trees -> trees) =
         Braces (v1, v2, v3)
     | Parens (v1, v2, v3) ->
         let v1 = map_tok v1
-        and v2 = List.map (OCaml.map_of_either map_trees map_tok) v2
+        and v2 = List_.map (OCaml.map_of_either map_trees map_tok) v2
         and v3 = map_tok v3 in
         Parens (v1, v2, v3)
     | Angle (v1, v2, v3) ->
@@ -257,7 +257,7 @@ let (mk_mapper : map_visitor -> trees -> trees) =
     | Tok v1 ->
         let v1 = map_wrap v1 in
         Tok v1
-  and map_trees v = List.map map_tree v
+  and map_trees v = List_.map map_tree v
   and map_tok v =
     let k v = v in
     hook.mtok k v
@@ -272,7 +272,7 @@ let (toks_of_trees : trees -> Tok.t list) =
  fun trees ->
   let globals = ref [] in
   let hooks =
-    { default_visitor with ktok = (fun (_k, _) i -> Common.push i globals) }
+    { default_visitor with ktok = (fun (_k, _) i -> Stack_.push i globals) }
   in
   let vout = mk_visitor hooks in
   vout trees;

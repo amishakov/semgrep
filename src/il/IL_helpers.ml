@@ -13,15 +13,16 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the file
  * LICENSE for more details.
  *)
+open Common
 open IL
 
 (*****************************************************************************)
 (* Prelude *)
 (*****************************************************************************)
 
-let compare_name x y =
-  let ident_cmp = String.compare (fst x.ident) (fst y.ident) in
-  if ident_cmp <> 0 then ident_cmp else AST_generic.SId.compare x.sid y.sid
+(***********************************************)
+(* L-values *)
+(***********************************************)
 
 let exp_of_arg arg =
   match arg with
@@ -34,10 +35,10 @@ let rexps_of_instr x =
       [ { e = Fetch { lval with rev_offset = [] }; eorig = NoOrig }; exp ]
   | Assign (_, exp) -> [ exp ]
   | AssignAnon _ -> []
-  | Call (_, e1, args) -> e1 :: Common.map exp_of_arg args
+  | Call (_, e1, args) -> e1 :: List_.map exp_of_arg args
   | New (_, _, _, args)
   | CallSpecial (_, _, args) ->
-      Common.map exp_of_arg args
+      List_.map exp_of_arg args
   | FixmeInstr _ -> []
 
 (* opti: could use a set *)
@@ -47,14 +48,15 @@ let rec lvals_of_exp e =
   | Literal _ -> []
   | Cast (_, e) -> lvals_of_exp e
   | Composite (_, (_, xs, _)) -> lvals_of_exps xs
-  | Operator (_, xs) -> lvals_of_exps (Common.map exp_of_arg xs)
-  | Record ys ->
+  | Operator (_, xs) -> lvals_of_exps (List_.map exp_of_arg xs)
+  | RecordOrDict ys ->
       lvals_of_exps
         (ys
-        |> Common.map @@ function
+        |> List.concat_map @@ function
            | Field (_, e)
            | Spread e ->
-               e)
+               [ e ]
+           | Entry (ke, ve) -> [ ke; ve ])
   | FixmeExp (_, _, Some e) -> lvals_of_exp e
   | FixmeExp (_, _, None) -> []
 
@@ -92,6 +94,23 @@ let is_pro_resolved_global name =
   | None ->
       false
 
+(* HACK: Because we don't have a "Class" type, classes have themselves as types. *)
+let is_class_name (name : name) =
+  match (!(name.id_info.id_resolved), !(name.id_info.id_type)) with
+  | Some resolved1, Some { t = TyN (Id (_, { id_resolved; _ })); _ } -> (
+      match !id_resolved with
+      | None -> false
+      | Some resolved2 ->
+          (* If 'name' has type 'name' then we assume it's a class. *)
+          AST_generic.equal_resolved_name resolved1 resolved2)
+  | _, None
+  | _, Some _ ->
+      false
+
+(***********************************************)
+(* L-values *)
+(***********************************************)
+
 let lval_of_var var = { IL.base = Var var; rev_offset = [] }
 
 let is_dots_offset offset =
@@ -124,8 +143,9 @@ let lvar_of_instr_opt x =
 let rlvals_of_node = function
   | Enter
   | Exit
-  | TrueNode
-  | FalseNode
+  (* must ignore exp in True and False *)
+  | TrueNode _
+  | FalseNode _
   | NGoto _
   | Join ->
       []
@@ -134,30 +154,48 @@ let rlvals_of_node = function
   | NReturn (_, e)
   | NThrow (_, e) ->
       lvals_of_exp e
-  | NLambda _
   | NOther _
   | NTodo _ ->
       []
 
-module LvalOrdered = struct
-  type t = lval
+let orig_of_node = function
+  | Enter
+  | Exit ->
+      None
+  | TrueNode e
+  | FalseNode e
+  | NCond (_, e)
+  | NReturn (_, e)
+  | NThrow (_, e) ->
+      Some e.eorig
+  | NInstr i -> Some i.iorig
+  | NGoto _
+  | Join
+  | NOther _
+  | NTodo _ ->
+      None
 
-  let compare lval1 lval2 =
-    (* Right now we only care about comparing lvals of the form `x.a_1. ... . a_n,
-       so it's OK if `Stdlib.compare` may not be the ideal comparison function for
-       the remaining cases. *)
-    match (lval1, lval2) with
-    | { base = Var x; rev_offset = ro1 }, { base = Var y; rev_offset = ro2 } ->
-        let name_cmp = compare_name x y in
-        if name_cmp <> 0 then name_cmp
-        else
-          List.compare
-            (fun offset1 offset2 ->
-              match (offset1.o, offset2.o) with
-              | Dot a, Dot b -> compare_name a b
-              | Index _, _
-              | _, Index _ ->
-                  Stdlib.compare offset1 offset2)
-            ro1 ro2
-    | _, _ -> Stdlib.compare lval1 lval2
-end
+(***********************************************)
+(* CFG *)
+(***********************************************)
+
+let rec reachable_nodes fun_cfg =
+  let main_nodes = CFG.reachable_nodes fun_cfg.cfg in
+  let lambdas_nodes =
+    fun_cfg.lambdas |> NameMap.to_seq
+    |> Seq.map (fun (_lname, lcfg) -> reachable_nodes lcfg)
+  in
+  Seq.concat (Seq.cons main_nodes lambdas_nodes)
+
+(***********************************************)
+(* Lambdas *)
+(***********************************************)
+
+let lval_is_lambda lambdas_cfgs lval =
+  match lval with
+  | { base = Var name; rev_offset = [] } ->
+      let* lambda_cfg = IL.NameMap.find_opt name lambdas_cfgs in
+      Some (name, lambda_cfg)
+  | { base = Var _ | VarSpecial _ | Mem _; rev_offset = _ } ->
+      (* Lambdas are only assigned to plain variables without any offset. *)
+      None

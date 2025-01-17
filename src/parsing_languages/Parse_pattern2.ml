@@ -12,6 +12,7 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the file
  * LICENSE for more details.
  *)
+open Fpath_.Operators
 open Pfff_or_tree_sitter
 
 (*****************************************************************************)
@@ -25,17 +26,19 @@ open Pfff_or_tree_sitter
 (*****************************************************************************)
 (* Entry point *)
 (*****************************************************************************)
-let parse_pattern print_errors lang str =
+let parse_pattern options lang str =
+  (* coupling: update the files semgrep/js/languages/<lang>/Parser.ml
+     when updating this function.
+     TODO: Share the logic of which parser to try for each language to
+     remove this coupling. https://github.com/semgrep/semgrep/issues/8331
+  *)
   match lang with
   (* use adhoc parser (neither menhir nor tree-sitter) *)
   | Lang.Yaml -> Yaml_to_generic.any str
   | Lang.Scala ->
       let any = Parse_scala.any_of_string str in
       Scala_to_generic.any any
-  (* Use menhir only (TODO: try to use also a tree-sitter one) *)
-  | Lang.C ->
-      let any = Parse_c.any_of_string str in
-      C_to_generic.any any
+  (* Use menhir and tree-sitter *)
   | Lang.Go ->
       let any = Parse_go.any_of_string str in
       Go_to_generic.any any
@@ -45,32 +48,47 @@ let parse_pattern print_errors lang str =
       Php_to_generic.any any
   | Lang.Ocaml ->
       let any = Parse_ml.any_of_string str in
-      Ml_to_generic.any any
-  | Lang.Ruby ->
-      let any = Parse_ruby.any_of_string str in
-      Ruby_to_generic.any any
+      Ocaml_to_generic.any any
   | Lang.Python
   | Lang.Python2
   | Lang.Python3 ->
-      let parsing_mode = Parse_target2.lang_to_python_parsing_mode lang in
-      let any = Parse_python.any_of_string ~parsing_mode str in
+      let any =
+        str
+        |> run_pattern
+             (* coupling: semgrep/js/languages/python/Parser.ml *)
+             [
+               PfffPat
+                 (let parsing_mode =
+                    Parse_target2.lang_to_python_parsing_mode lang
+                  in
+                  Parse_python.any_of_string ~parsing_mode);
+               TreeSitterPat Parse_python_tree_sitter.parse_pattern;
+             ]
+      in
+
       Python_to_generic.any any
   (* Use menhir and tree-sitter *)
+  | Lang.C
   | Lang.Cpp ->
       let any =
         str
-        |> run_pattern ~print_errors
+        |> run_pattern
+             (* coupling: semgrep/js/languages/cpp/Parser.ml *)
              [
                PfffPat
                  (fun x -> Parse_cpp.any_of_string Flag_parsing_cpp.Cplusplus x);
                TreeSitterPat Parse_cpp_tree_sitter.parse_pattern;
              ]
       in
-      Cpp_to_generic.any any
+      Cpp_to_generic.any
+        ?parsing_opt:
+          (Option.map (fun x -> x.Rule_options_t.cpp_parsing_pref) options)
+        any
   | Lang.Java ->
       let any =
         str
-        |> run_pattern ~print_errors
+        |> run_pattern
+             (* coupling: semgrep/js/languages/java/Parser.ml *)
              [
                (* TODO: we should switch to TreeSitterPat first, but
                 * we get regressions on generic_args.sgrep because
@@ -87,7 +105,8 @@ let parse_pattern print_errors lang str =
   | Lang.Vue ->
       let js_ast =
         str
-        |> run_pattern ~print_errors
+        |> run_pattern
+             (* coupling: semgrep/js/languages/typescript/Parser.ml *)
              [
                PfffPat Parse_js.any_of_string;
                TreeSitterPat Parse_typescript_tree_sitter.parse_pattern;
@@ -100,76 +119,101 @@ let parse_pattern print_errors lang str =
   (* Tree-sitter only and use intermediate AST *)
   | Lang.Bash ->
       let res = Parse_bash_tree_sitter.parse_pattern str in
-      let program = extract_pattern_from_tree_sitter_result res print_errors in
+      let program = extract_pattern_from_tree_sitter_result res in
       Bash_to_generic.any program
   | Lang.Jsonnet ->
       let res = Parse_jsonnet_tree_sitter.parse_pattern str in
-      let pattern = extract_pattern_from_tree_sitter_result res print_errors in
+      let pattern = extract_pattern_from_tree_sitter_result res in
       Jsonnet_to_generic.any pattern
   | Lang.Terraform ->
       let res = Parse_terraform_tree_sitter.parse_pattern str in
-      let pattern = extract_pattern_from_tree_sitter_result res print_errors in
+      let pattern = extract_pattern_from_tree_sitter_result res in
       Terraform_to_generic.any pattern
+  | Lang.Ql ->
+      let res = Parse_ql_tree_sitter.parse_pattern str in
+      let pattern = extract_pattern_from_tree_sitter_result res in
+      QL_to_generic.any pattern
   (* Tree-sitter only and directly to generic AST *)
-  | Lang.Apex ->
-      let res = Parsing_plugin.Apex.parse_pattern str in
-      extract_pattern_from_tree_sitter_result res print_errors
   | Lang.Csharp ->
-      let res = Parse_csharp_tree_sitter.parse_pattern str in
-      extract_pattern_from_tree_sitter_result res print_errors
+      let parse_pattern =
+        if Parsing_plugin.Csharp.is_available () then
+          Parsing_plugin.Csharp.parse_pattern
+        else Parse_csharp_tree_sitter.parse_pattern
+      in
+      let res = parse_pattern str in
+      extract_pattern_from_tree_sitter_result res
   | Lang.Cairo ->
       let res = Parse_cairo_tree_sitter.parse_pattern str in
-      extract_pattern_from_tree_sitter_result res print_errors
+      extract_pattern_from_tree_sitter_result res
   | Lang.Dart ->
       let res = Parse_dart_tree_sitter.parse_pattern str in
-      extract_pattern_from_tree_sitter_result res print_errors
+      extract_pattern_from_tree_sitter_result res
   | Lang.Dockerfile ->
       let res = Parse_dockerfile_tree_sitter.parse_docker_or_bash_pattern str in
-      extract_pattern_from_tree_sitter_result res print_errors
-  | Lang.Elixir ->
-      let res = Parse_elixir_tree_sitter.parse_pattern str in
-      let pattern = extract_pattern_from_tree_sitter_result res print_errors in
-      Elixir_to_generic.any pattern
+      extract_pattern_from_tree_sitter_result res
   | Lang.Hack ->
       let res = Parse_hack_tree_sitter.parse_pattern str in
-      extract_pattern_from_tree_sitter_result res print_errors
+      extract_pattern_from_tree_sitter_result res
   | Lang.Html
   | Lang.Xml ->
       let res = Parse_html_tree_sitter.parse_pattern str in
-      extract_pattern_from_tree_sitter_result res print_errors
+      extract_pattern_from_tree_sitter_result res
   | Lang.Lisp
   | Lang.Scheme
   | Lang.Clojure ->
       let res = Parse_clojure_tree_sitter.parse_pattern str in
-      extract_pattern_from_tree_sitter_result res print_errors
+      extract_pattern_from_tree_sitter_result res
   | Lang.Lua ->
       let res = Parse_lua_tree_sitter.parse_pattern str in
-      extract_pattern_from_tree_sitter_result res print_errors
+      extract_pattern_from_tree_sitter_result res
+  | Lang.Promql ->
+      let res = Parse_promql_tree_sitter.parse_pattern str in
+      extract_pattern_from_tree_sitter_result res
   | Lang.Protobuf ->
       let res = Parse_protobuf_tree_sitter.parse_pattern str in
-      extract_pattern_from_tree_sitter_result res print_errors
+      extract_pattern_from_tree_sitter_result res
   | Lang.Rust ->
       let res = Parse_rust_tree_sitter.parse_pattern str in
-      extract_pattern_from_tree_sitter_result res print_errors
+      extract_pattern_from_tree_sitter_result res
   | Lang.Kotlin ->
       let res = Parse_kotlin_tree_sitter.parse_pattern str in
-      extract_pattern_from_tree_sitter_result res print_errors
+      extract_pattern_from_tree_sitter_result res
   | Lang.Julia ->
       let res = Parse_julia_tree_sitter.parse_pattern str in
-      extract_pattern_from_tree_sitter_result res print_errors
+      extract_pattern_from_tree_sitter_result res
+  | Lang.Ruby ->
+      let res = Parse_ruby_tree_sitter.parse_pattern str in
+      let program = extract_pattern_from_tree_sitter_result res in
+      Ruby_to_generic.any program
   | Lang.R ->
       let res = Parse_r_tree_sitter.parse_pattern str in
-      extract_pattern_from_tree_sitter_result res print_errors
+      extract_pattern_from_tree_sitter_result res
   | Lang.Solidity ->
       let res = Parse_solidity_tree_sitter.parse_pattern str in
-      extract_pattern_from_tree_sitter_result res print_errors
+      extract_pattern_from_tree_sitter_result res
   | Lang.Swift ->
       let res = Parse_swift_tree_sitter.parse_pattern str in
-      extract_pattern_from_tree_sitter_result res print_errors
-(* not yet handled ?? *)
-(* | Lang.Xxx -> failwith "No Xxx generic parser yet" *)
+      extract_pattern_from_tree_sitter_result res
+  (* external plugins *)
+  | Lang.Apex ->
+      let res = Parsing_plugin.Apex.parse_pattern str in
+      extract_pattern_from_tree_sitter_result res
+  | Lang.Elixir ->
+      let res = Parsing_plugin.Elixir.parse_pattern str in
+      extract_pattern_from_tree_sitter_result res
+  | Lang.Move_on_sui ->
+      let res = Parse_move_on_sui_tree_sitter.parse_pattern str in
+      extract_pattern_from_tree_sitter_result res
+  | Lang.Move_on_aptos ->
+      let res = Parse_move_on_aptos_tree_sitter.parse_pattern str in
+      extract_pattern_from_tree_sitter_result res
+  | Lang.Circom ->
+      let res = Parse_circom_tree_sitter.parse_pattern str in
+      extract_pattern_from_tree_sitter_result res
+(* TODO *)
 
-let dump_tree_sitter_pattern_cst lang file =
+let dump_tree_sitter_pattern_cst (lang : Lang.t) (path : Fpath.t) : unit =
+  let file = !!path in
   match lang with
   | Lang.Csharp ->
       Tree_sitter_c_sharp.Parse.file file

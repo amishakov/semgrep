@@ -86,7 +86,7 @@ let tuple_expr_store l =
 
 let mk_str ii =
   let s = Tok.content_of_tok ii in
-  Str (s, ii)
+  Literal( Str (s, ii))
 
 %}
 
@@ -109,7 +109,7 @@ let mk_str ii =
 
 (* tokens with "values" *)
 %token <string * AST_python.tok> NAME
-%token <int option    * AST_python.tok> INT LONGINT
+%token <Parsed_int.t> INT LONGINT
 %token <float option  * AST_python.tok> FLOAT
 %token <string * AST_python.tok> IMAG
 %token <string * string * AST_python.tok> STR
@@ -389,7 +389,7 @@ typedargslist:
 typed_parameter:
   | tfpdef_or_fpdef { ParamPattern (fst $1, snd $1) }
   (* TODO check default args come after variable args later *)
-  | tfpdef "=" test { ParamDefault ($1, $3) }
+  | tfpdef "=" test { ParamDefault ((PatternName (fst $1), snd $1), $3) }
   | "*" tfpdef      { ParamStar ($1, $2) }
   | "*"             { ParamSingleStar $1 }
   (* python3-ext: https://www.python.org/dev/peps/pep-0570/ *)
@@ -421,7 +421,7 @@ varargslist:
 (* python3-ext: can be in any order, ParamStar before or after Classic *)
 parameter:
   | fpdef           { ParamPattern ($1, None) }
-  | NAME "=" test   { ParamDefault (($1, None), $3) }
+  | NAME "=" test   { ParamDefault ((PatternName $1, None), $3) }
   | "*" NAME        { ParamStar ($1, ($2, None)) }
   (* python3-ext: https://www.python.org/dev/peps/pep-0570/ *)
   | "/"             { ParamSlash $1 }
@@ -604,15 +604,15 @@ for_stmt:
 
 try_stmt:
   | TRY ":" suite excepthandler+
-      { TryExcept ($1, $3, $4, []) }
+      { TryExcept ($1, $3, $4, None, None) }
   | TRY ":" suite excepthandler+ ELSE ":" suite
-      { TryExcept ($1, $3, $4, $7) }
+      { TryExcept ($1, $3, $4, Some ($5, $7), None) }
   | TRY ":" suite excepthandler+ ELSE ":" suite FINALLY ":" suite
-      { TryFinally ($1, [TryExcept ($1, $3, $4, $7)], $8, $10) }
+      { TryExcept ($1, $3, $4, Some ($5, $7), Some ($8, $10)) }
   | TRY ":" suite excepthandler+ FINALLY ":" suite
-      { TryFinally ($1, [TryExcept ($1, $3, $4, [])], $5, $7) }
+      { TryExcept ($1, $3, $4, None, Some ($5, $7)) }
   | TRY ":" suite FINALLY ":" suite
-      { TryFinally ($1, $3, $4, $6) }
+      { TryExcept ($1, $3, [], None, Some ($4, $6)) }
 
 excepthandler:
   | EXCEPT              ":" suite { ExceptHandler ($1, None, None, $3) }
@@ -769,15 +769,15 @@ type_for_lsif:
 atom:
   | NAME        { Name ($1, Load) }
 
-  | INT         { Num (Int ($1)) }
-  | LONGINT     { Num (LongInt ($1)) }
-  | FLOAT       { Num (Float ($1)) }
-  | IMAG        { Num (Imag ($1)) }
+  | INT         { Literal (Num (Int $1)) }
+  | LONGINT     { Literal (Num (LongInt ($1))) }
+  | FLOAT       { Literal (Num (Float ($1))) }
+  | IMAG        { Literal (Num (Imag ($1))) }
 
-  | TRUE        { Bool (true, $1) }
-  | FALSE       { Bool (false, $1) }
+  | TRUE        { Literal (Bool (true, $1)) }
+  | FALSE       { Literal (Bool (false, $1)) }
 
-  | NONE        { None_ $1 }
+  | NONE        { Literal (None_ $1) }
 
   | string+ {
      match $1 with
@@ -808,11 +808,11 @@ testlist1:
 
 string:
   | STR { let (s, pre, tok) = $1 in
-          if pre = "" then Str (s, tok) else EncodedStr ((s, tok), pre) }
+          if pre = "" then Literal (Str (s, tok)) else EncodedStr ((s, tok), pre) }
   | FSTRING_START interpolated* FSTRING_END { InterpolatedString ($1, $2, $3) }
 
 interpolated:
-  | FSTRING_STRING { Str $1 }
+  | FSTRING_STRING { Literal (Str $1) }
   | FSTRING_LBRACE interpolant fstring_print_spec "}" { InterpolatedString ($1, $2::$3, $4) }
 
 fstring_print_spec:

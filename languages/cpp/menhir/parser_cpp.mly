@@ -18,6 +18,7 @@
  * license.txt for more details.
  *)
 open Common
+open Either_
 
 open Ast_cpp
 open Parser_cpp_mly_helper
@@ -66,7 +67,7 @@ open Parser_cpp_mly_helper
 (*-----------------------------------------*)
 (* The C tokens *)
 (*-----------------------------------------*)
-%token <int option * Tok.t>   TInt
+%token <Parsed_int.t>   TInt
 %token <float option * Tok.t> TFloat
 %token <string * Tok.t>       TChar TString
 
@@ -171,6 +172,7 @@ open Parser_cpp_mly_helper
    Toperator
    Tpublic Tprivate Tprotected    Tfriend
    Tvirtual
+   Tfinal Toverride
    Tnamespace Tusing
    Tbool    Tfalse Ttrue
    Twchar_t
@@ -459,8 +461,8 @@ expr:
  * 'cast_expr', otherwise (int * ) xxx = &yy; is not allowed *)
 assign_expr:
  | cond_expr                     { $1 }
- | cast_expr TAssign assign_expr { Assign ($1,OpAssign $2,$3)}
- | cast_expr "="     assign_expr { Assign ($1,SimpleAssign $2,$3)}
+ | cast_expr TAssign assign_expr { Assign ($1,OpAssign $2, Left $3)}
+ | cast_expr "="     assign_expr { Assign ($1,SimpleAssign $2,Left $3)}
  (* c++ext: in treesitter it's a stmt, but in the spec it is an expr *)
  | Tthrow assign_expr?        { Throw ($1, $2) }
 
@@ -540,10 +542,10 @@ unary_expr:
  | TInc unary_expr         { Prefix ((Inc, $1), $2) }
  | TDec unary_expr         { Prefix ((Dec, $1), $2) }
  | unary_op cast_expr      { Unary ($1, $2) }
- | Tsizeof unary_expr      { SizeOf ($1, Left $2) }
- | Tsizeof "(" type_id ")" { SizeOf ($1, Right ($2, $3, $4)) }
+ | Tsizeof unary_expr      { Call (IdSpecial (SizeOf, $1), Tok.unsafe_fake_bracket [Arg $2]) }
+ | Tsizeof "(" type_id ")" { Call (IdSpecial (SizeOf, $1), ($2, [ArgType $3], $4)) }
  (* sgrep-ext: *)
- | Tsizeof "(" "..." ")"   { SizeOf ($1, Left (Ellipsis $3)) }
+ | Tsizeof "(" "..." ")"   { Call (IdSpecial (SizeOf, $1), ($2, [Arg (Ellipsis $3)], $4)) }
  (*c++ext: *)
  | new_expr      { $1 }
  | delete_expr   { $1 }
@@ -563,7 +565,7 @@ unary_op:
 postfix_expr:
  | primary_expr               { $1 }
 
- | postfix_expr "[" expr "]"              { ArrayAccess ($1, ($2, $3,$4)) }
+ | postfix_expr "[" expr "]"              { ArrayAccess ($1, ($2, [InitExpr $3],$4)) }
  | postfix_expr "(" optl(listc(argument)) ")" { mk_funcall $1 ($2, $3, $4) }
 
  (*c++ext: ident is now a id_expression *)
@@ -614,9 +616,9 @@ primary_expr:
     { let (l, xs, r) = $1 in
       let ft_ret = nQ, TAuto l in
       let f_type = { ft_ret; ft_params = (l, [], r);
-                     ft_specs = []; ft_const = None; ft_throw = [] }
+                     ft_specs = []; ft_const = None; ft_throw = []; ft_requires = None}
       in
-      let fdef = { f_type; f_body = FBDef $2; f_specs = []}
+      let fdef = { f_type; f_body = FBDef (Normal $2); f_specs = []}
       in
       Lambda ((l, xs, r), fdef)
     }
@@ -629,7 +631,7 @@ literal:
  | TChar   { C (Char   ($1)) }
  | TString { C (String ($1)) }
  (* gccext: cppext: *)
- | string_elem string_elem+ { C (MultiString ($1 :: $2)) }
+ | string_elem string_elem+ { C (MultiString (List_.map (fun x -> StrLit x) ($1 :: $2))) }
  (*c++ext: *)
  | Ttrue   { C (Bool (true, $1)) }
  | Tfalse  { C (Bool (false, $1)) }
@@ -641,24 +643,27 @@ literal:
 (* c++ext: *)
 (*----------------------------*)
 
+primary_cplusplus_id:
+  | primary_cplusplus_id_inner { N ($1) }
+
 (* can't factorize with following rule :(
  * | "::"? optl(nested_name_specifier) TIdent
  *)
-primary_cplusplus_id:
+primary_cplusplus_id_inner:
  | id_expression
      { let name = (None, fst $1, snd $1) in
-       N (name) }
+       name }
  (* grammar_c++: is in qualified_id inside id_expression instead? *)
  | "::" TIdent
      { let name = Some $1, noQscope, IdIdent $2 in
-       N (name) }
+       name }
  | "::" operator_function_id
      { let qop = $2 in
        let name = (Some $1, noQscope, qop) in
-       N (name) }
+       name }
  | "::" qualified_id
      { let name = (Some $1, fst $2, snd $2) in
-       N (name) }
+       name }
 
 (*could use TInf here *)
 cast_operator_expr:
@@ -745,7 +750,7 @@ capture:
  | "&" ident { Unary ((GetRef, $1), expr_of_id $2) }
  | Tthis     { IdSpecial (This, $1) }
  (* grammar_c++: not in latest *)
- | ident "=" assign_expr { Assign (expr_of_id $1, SimpleAssign $2, $3) }
+ | ident "=" assign_expr { Assign (expr_of_id $1, SimpleAssign $2, Left $3) }
 
 (*----------------------------*)
 (* gccext: *)
@@ -869,7 +874,7 @@ iteration:
      { For ($1, ($2, ForClassic ($3, fst $4, $5), $6), $7) }
  (* c++ext: *)
  | Tfor "(" for_range_decl ":" for_range_init ")" statement
-     { For ($1, ($2, ForRange ($3, $4, $5), $6), $7) }
+     { For ($1, ($2, ForRange (None, $3, $4, $5), $6), $7) }
  (* sgrep-ext: *)
  | Tfor "(" "..." ")" statement
      { For ($1, ($2, ForEllipsis $3, $4), $5) }
@@ -904,14 +909,14 @@ statement_or_decl_cpp:
 
 %inline
 condition:
- | expr { CondClassic $1 }
+ | expr { None, CondClassic $1 }
  (* c++ext: *)
  | decl_spec_seq declaratori "=" initializer_clause
      { let (t_ret, _sto, mods) = type_and_storage_from_decl $1 in
        let (name, ftyp) = $2 in
        let ent = { name; specs = mods |> List.map (fun x -> M x) } in
        let var = { v_type = ftyp t_ret; v_init = Some (EqInit ($3, $4)) } in
-       CondOneDecl (ent, var) }
+       None, CondOneDecl (ent, var) }
 
 
 for_init_stmt:
@@ -923,7 +928,7 @@ for_range_decl: type_spec_seq2 declarator
   { let (t_ret, _sto, mods) = type_and_storage_from_decl $1 in
     let (name, ftyp) = $2 in
     let ent = { name; specs = mods |> List.map (fun x -> M x) } in
-    ent, { v_type = ftyp t_ret; v_init = None } }
+    ftyp t_ret, ent }
 
 for_range_init: expr { InitExpr $1 }
 
@@ -1077,17 +1082,17 @@ direct_d:
      { (fst $1, fun x->(snd $1) (nQ,(TArray (($2,None,$3),x)))) }
  | direct_d "[" const_expr "]"
      { (fst $1, fun x->(snd $1) (nQ,(TArray (($2, Some $3, $4),x)))) }
- | direct_d "(" ")" const_opt exn_spec?
+ | direct_d "(" ")" const_opt exn_spec? optl(virtual_specifier+)
      { (fst $1, fun x-> (snd $1)
          (nQ, (TFunction {
            ft_ret= x; ft_params = ($2, [], $3);
-           ft_specs = []; ft_const = $4; ft_throw = Option.to_list $5; })))
+           ft_specs = $6; ft_const = $4; ft_throw = Option.to_list $5; ft_requires = None; })))
      }
- | direct_d "(" parameter_type_list ")" const_opt exn_spec?
+ | direct_d "(" parameter_type_list ")" const_opt exn_spec? optl(virtual_specifier+)
      { (fst $1, fun x-> (snd $1)
           (nQ,(TFunction {
             ft_ret = x; ft_params = ($2,$3,$4);
-            ft_specs = []; ft_const = $5; ft_throw = Option.to_list $6; })))
+            ft_specs = $7; ft_const = $5; ft_throw = Option.to_list $6; ft_requires = None;})))
      }
 
 (*----------------------------*)
@@ -1120,19 +1125,19 @@ direct_abstract_declarator:
  | "(" ")"
      { fun x -> (nQ, (TFunction {
        ft_ret = x; ft_params = ($1,[],$2);
-       ft_specs = []; ft_const = None; ft_throw = [];})) }
+       ft_specs = []; ft_const = None; ft_throw = []; ft_requires = None })) }
  | "(" parameter_type_list ")"
      { fun x -> (nQ, (TFunction {
          ft_ret = x; ft_params = ($1,$2,$3);
-         ft_specs = []; ft_const = None; ft_throw = []; })) }
+         ft_specs = []; ft_const = None; ft_throw = []; ft_requires = None })) }
  | direct_abstract_declarator "(" ")" const_opt exn_spec?
      { fun x -> $1 (nQ, (TFunction {
          ft_ret = x; ft_params = ($2,[],$3);
-         ft_specs = []; ft_const = $4; ft_throw = Option.to_list $5; })) }
+         ft_specs = []; ft_const = $4; ft_throw = Option.to_list $5; ft_requires = None; })) }
  | direct_abstract_declarator "(" parameter_type_list ")" const_opt exn_spec?
      { fun x -> $1 (nQ, (TFunction {
          ft_ret = x; ft_params = ($2,$3,$4);
-         ft_specs = []; ft_const = $5; ft_throw = Option.to_list $6; })) }
+         ft_specs = []; ft_const = $5; ft_throw = Option.to_list $6; ft_requires = None })) }
 
 (*-----------------------------------------------------------------------*)
 (* Parameters (use decl_spec_seq not type_spec just for 'register') *)
@@ -1147,8 +1152,9 @@ parameter_type_list:
 parameter_decl:
  | decl_spec_seq declarator
      { let (t_ret, p_specs) = type_and_specs_from_decl $1 in
-       let (name, ftyp) = fixNameForParam $2 in
-       P (make_param (ftyp t_ret) ~p_name:(Some name) ~p_specs) }
+       let ii = Tok.unsafe_fake_tok "" in
+       let (name, ftyp) = fixNameForParam ii $2 in
+       P (make_param (ftyp t_ret) ~p_name:name ~p_specs) }
  | decl_spec_seq abstract_declarator
      { let (t_ret, p_specs) = type_and_specs_from_decl $1 in
        P (make_param ($2 t_ret) ~p_specs ) }
@@ -1160,14 +1166,14 @@ parameter_decl:
 (*c++ext: default parameter value, copy paste *)
  | decl_spec_seq declarator "=" assign_expr
      { let (t_ret, p_specs) = type_and_specs_from_decl $1 in
-       let (name, ftyp) = fixNameForParam $2 in
-       P (make_param (ftyp t_ret) ~p_name:(Some name) ~p_specs ~p_val:(Some ($3, $4))) }
+       let (name, ftyp) = fixNameForParam $3 $2 in
+       P (make_param (ftyp t_ret) ~p_name:name ~p_specs ~p_val:($3, $4)) }
  | decl_spec_seq abstract_declarator "=" assign_expr
      { let (t_ret, p_specs) = type_and_specs_from_decl $1 in
-       P (make_param ($2 t_ret) ~p_specs ~p_val:(Some ($3, $4))) }
+       P (make_param ($2 t_ret) ~p_specs ~p_val:($3, $4)) }
  | decl_spec_seq "=" assign_expr
      { let (t_ret, p_specs) = type_and_specs_from_decl $1 in
-       P (make_param t_ret ~p_specs ~p_val:(Some($2,$3)) ) }
+       P (make_param t_ret ~p_specs ~p_val:($2,$3) ) }
  (* sgrep-ext: allowed only in last position in C, or in exn in C++ *)
  | "..." { ParamEllipsis $1 }
 
@@ -1317,10 +1323,10 @@ class_head:
      { $1, None, [] }
  | class_key ident base_clause?
      { let name = name_of_id $2 in
-       $1, Some name, optlist_to_list $3 }
+       $1, Some name, List_.optlist_to_list $3 }
  | class_key nested_name_specifier ident base_clause?
      { let name = name_of_id $3 in
-       $1, Some name, optlist_to_list $4 }
+       $1, Some name, List_.optlist_to_list $4 }
 
 (* was called struct_union before *)
 class_key:
@@ -1432,7 +1438,7 @@ member_declarator:
 
  (* normally just ident, but ambiguity so solve by inspetcing declarator *)
  | declarator ":" const_expr
-     { let (name, _partialt) = fixNameForParam $1 in
+     { let (name, _partialt) = fixNameForParam $2 $1 in
        (fun t_ret _stoTODO ->
          (BitField (Some name, $2, t_ret, $3)))
      }
@@ -1447,7 +1453,7 @@ member_declarator:
 enum_specifier:
  | enum_head "{" listc(enumerator) ","? "}"
      { EnumDef ({enum_kind = fst $1; enum_name = snd $1;
-                enum_body = ($2, $3, $5)}) (*$4*) }
+                enum_body = ($2, List.flatten $3, $5)}) (*$4*) }
  (* c++0x: *)
  | enum_head "{" "}"
      { EnumDef ({enum_kind = fst $1; enum_name = snd $1;
@@ -1458,8 +1464,8 @@ enum_head:
      { $1, $2 |> Option.map name_of_id }
 
 enumerator:
- | ident                { { e_name = $1; e_val = None; } }
- | ident "=" const_expr { { e_name = $1; e_val = Some ($2, $3); } }
+ | ident                { [ X { e_name = $1; e_val = None; } ] }
+ | ident "=" const_expr { [ X { e_name = $1; e_val = Some ($2, $3); } ] }
 
 (*-----------------------------------------------------------------------*)
 (* c++ext: constructor special case *)
@@ -1535,17 +1541,14 @@ storage_class_spec:
  (* c++ext: now really used, not as in C, for type inferred variables *)
  | Tauto        { Sto (Auto,    $1) }
  | Tregister    { Sto (Register,$1) }
- (* for thread_local see below *)
+ (* c++11 *)
+ | Tthread_local { Sto (ThreadLocal, $1) }
 
 type_qualifier:
  (* c++ext: also considered a storage class specifier in the spec *)
  | Tmutable     { TQ (Mutable, $1) }
  (* c++?: *)
  | Tconstexpr   { TQ (Constexpr, $1) }
- (* c++11: considered a storafe_class, but can be combined with Extern/Static
-  * so simpler to put as a specifier.
-  *)
- | Tthread_local { TQ (Constexpr, $1) (*TODOAST*) }
 
 (*-----------------------------------------------------------------------*)
 (* declarators (right part of type and variable) *)
@@ -1611,7 +1614,7 @@ initialize2:
 
 (* they can be nested, can have a .x.[3].y *)
 designator:
- | TDot ident   { DesignatorField ($1, $2) }
+ | TDot ident   { DesignatorField (Some $1, $2) }
 (* conflict with kenccext
  | "[" const_expr "]"     %prec LOW_PRIORITY_RULE
      { DesignatorIndex ($1, $2, $3) }
@@ -1719,7 +1722,7 @@ declaration_cpp:
 
 template_declaration:
   Ttemplate TInf_Template optl(listc(template_parameter)) TSup_Template declaration
-   { TemplateDecl ($1, ($2, $3, $4), $5) }
+   { TemplateDecl ($1, ($2, $3, $4), None, $5) }
 
 (*todo: '| type_parameter'
    * ambiguity with parameter_decl cos a type can also be 'class X'
@@ -1747,7 +1750,7 @@ namespace_definition:
  *)
 named_namespace_definition:
  | Tnamespace TIdent "{" optl(declaration_cpp+) "}"
-     { Namespace ($1, Some $2, ($3, $4, $5)) }
+     { Namespace ($1, Some (None, [], IdIdent $2), ($3, $4, $5)) }
 
 unnamed_namespace_definition: Tnamespace "{" optl(declaration_cpp+) "}"
      { Namespace ($1, None, ($2, $3, $4)) }
@@ -1755,11 +1758,15 @@ unnamed_namespace_definition: Tnamespace "{" optl(declaration_cpp+) "}"
 (*************************************************************************)
 (* Function definition *)
 (*************************************************************************)
+virtual_specifier:
+| Tfinal { M (Final ($1)) }
+| Toverride { M (Override ($1)) }
 
 function_definition:
  | decl_spec_seq declarator function_body
      { let (t_ret, sto) = type_and_storage_for_funcdef_from_decl $1 in
-       let x = (fst $2, fixOldCDecl ((snd $2) t_ret), sto) in
+       let ii = Tok.unsafe_fake_tok "" in
+       let x = (fst $2, fixOldCDecl ii ((snd $2) t_ret), sto) in
        fixFunc (x, $3)
      }
  (* c++0x: TODO 2 more s/r conflicts and regressions! *)
@@ -1778,7 +1785,7 @@ function_definition:
      }
 *)
 function_body:
- | compound { FBDef $1 }
+ | compound { FBDef (Normal $1) }
 
 (*-----------------------------------------------------------------------*)
 (* c++ext: constructor special case *)
@@ -1789,23 +1796,23 @@ function_body:
  *)
 ctor_dtor:
  | nested_name_specifier TIdent_Constructor "(" parameter_type_list? ")"
-     ctor_mem_initializer_list_opt
+     ctor_mem_initializer_list
      compound
-     { (Func ((mk_constructor [] $2 ($3, $4, $5) $6 (FBDef $7)))) (*TODO$1*) }
+     { (Func ((mk_constructor [] $2 ($3, $4, $5) (FBDef (Constr ($6, $7)))))) (*TODO$1*) }
   (* new_type_id, could also introduce a Tdestructorname or forbidy the
       TypedefIdent2 transfo by putting a guard in the lalr(k) rule by
       checking if have a ~ before
    *)
  | nested_name_specifier TTilde ident "(" Tvoid? ")" exn_spec? compound
-     { (Func ((mk_destructor [] $2 $3 ($4, $5, $6) $7 (FBDef $8)))) }
+    { (Func ((mk_destructor [] $2 $3 ($4, $5, $6) $7 (FBDef (Normal $8))))) }
 
 (* TODO: remove once we don't skip qualifiers *)
  | Tinline? TIdent_Constructor "(" parameter_type_list? ")"
-     ctor_mem_initializer_list_opt
+     ctor_mem_initializer_list
      compound
      { DeclTodo ("DeclCtor", $3) }
  | TTilde ident "(" Tvoid? ")" exn_spec? compound
-     { (Func ((mk_destructor [] $1 $2 ($3, $4, $5) $6 (FBDef $7)))) }
+     { (Func ((mk_destructor [] $1 $2 ($3, $4, $5) $6 (FBDef (Normal $7))))) }
 
 
 
@@ -1815,18 +1822,18 @@ ctor_dtor:
 *)
 ctor_dtor_member:
  | ctor_spec TIdent_Constructor "(" parameter_type_list? ")"
-     ctor_mem_initializer_list_opt
+     ctor_mem_initializer_list
      compound
-     { F (Func ((mk_constructor $1 $2 ($3, $4, $5) $6 (FBDef $7)))) }
+     { F (Func ((mk_constructor $1 $2 ($3, $4, $5) (FBDef (Constr ($6, $7)))))) }
  | ctor_spec TIdent_Constructor "(" parameter_type_list? ")" ";"
-     { F (Func (mk_constructor $1 $2 ($3, $4, $5) None (FBDecl $6))) }
+     { F (Func (mk_constructor $1 $2 ($3, $4, $5) (FBDecl $6))) }
  | ctor_spec TIdent_Constructor "(" parameter_type_list? ")" "=" Tdelete ";"
-     { F (Func (mk_constructor $1 $2 ($3, $4, $5) None (FBDelete ($6, $7, $8)))) }
+     { F (Func (mk_constructor $1 $2 ($3, $4, $5) (FBDelete ($6, $7, $8)))) }
  | ctor_spec TIdent_Constructor "(" parameter_type_list? ")" "=" Tdefault ";"
-     { F (Func (mk_constructor $1 $2 ($3, $4, $5) None (FBDefault ($6, $7, $8)))) }
+     { F (Func (mk_constructor $1 $2 ($3, $4, $5) (FBDefault ($6, $7, $8)))) }
 
  | dtor_spec TTilde ident "(" Tvoid? ")" exn_spec? compound
-     { F (Func ((mk_destructor $1 $2 $3 ($4, $5, $6) $7 (FBDef $8)))) }
+     { F (Func ((mk_destructor $1 $2 $3 ($4, $5, $6) $7 (FBDef (Normal $8))))) }
  | dtor_spec TTilde ident "(" Tvoid? ")" exn_spec? ";"
      { F (Func (mk_destructor $1 $2 $3 ($4, $5, $6) $7 (FBDecl $8))) }
  | dtor_spec TTilde ident "(" Tvoid? ")" exn_spec? "=" Tdelete ";"
@@ -1845,17 +1852,17 @@ dtor_spec:
  | Tinline  { [M (Inline $1)] }
  | (*empty*) { [] }
 
-ctor_mem_initializer_list_opt:
- | ":" listc(mem_initializer) { Some ($1, $2) }
- | (* empty *) { None }
+ctor_mem_initializer_list:
+ | ":" listc(mem_initializer) { $2 }
+ | (* empty *) { [] }
 
 mem_initializer:
- | mem_initializer_id "(" optl(listc(argument)) ")" { () (* TODOAST*) }
+ | mem_initializer_id "(" optl(listc(argument)) ")" { $1, Args ($2, $3, $4) }
 
 (* factorize with declarator_id ? specialisation *)
 mem_initializer_id:
 (* specialisation | TIdent { () } *)
- | primary_cplusplus_id { $1 }
+ | primary_cplusplus_id_inner { $1 }
 
 (*************************************************************************)
 (* Cpp directives *)
@@ -1904,7 +1911,7 @@ define_val:
  (* for statement-like macro with fixed number of arguments *)
  | Tdo statement Twhile "(" expr ")"
      { match $5 with
-       | (C (Int (Some 0, tok))) ->
+       | (C (Int ((_, tok) as pi))) when Parsed_int.eq_const pi 0 ->
          DefineDoWhileZero ($1, $2, $3, ($4, tok, $6))
        | _ -> raise Parsing.Parse_error
      }

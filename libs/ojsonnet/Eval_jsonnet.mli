@@ -1,4 +1,4 @@
-exception Error of string * Tok.t
+(* Rely on Conf_ojsonnet flags *)
 
-(* may raise Error *)
-val eval_program : Core_jsonnet.program -> Value_jsonnet.value_
+val eval_program : Core_jsonnet.program -> Value_jsonnet.t
+val manifest_value : Value_jsonnet.t -> JSON.t

@@ -6,21 +6,25 @@ open Cmdliner
 (*
    Shared CLI flags, CLI processing helpers, and help messages for the
    semgrep CLI.
-
-   TODO: parser+printer for file path so we can write things like:
-
-        Arg.value (Arg.opt (Arg.some CLI_common.fpath) None info)
-
-      instead of
-
-        Arg.value (Arg.opt (Arg.some Arg.string) None info)
-        (* + having to convert the string to an fpath by hand *)
-
-      The main benefit would be to clarify error messages by having Fpath.t
-      instead of string.
-
-   val fpath : Fpath.t Cmdliner.conv????
 *)
+
+(*************************************************************************)
+(* Types and constants *)
+(*************************************************************************)
+
+type conf = {
+  (* mix of --debug, --quiet, --verbose *)
+  logging_level : Logs.level option;
+  (* osemgrep-only: pad poor's man profiling info for now *)
+  profile : bool;
+  (* osemgrep-only: mix of --experimental, --legacy, --develop *)
+  maturity : Maturity.t;
+}
+[@@deriving show]
+
+let blurb_pro =
+  "Requires Semgrep Pro Engine. See https://semgrep.dev/products/pro-engine/ \
+   for more."
 
 (*************************************************************************)
 (* Verbosity options (mutually exclusive) *)
@@ -28,11 +32,15 @@ open Cmdliner
 
 (* alt: we could use Logs_cli.level(), but by defining our own flags
  * we can give better ~doc:. We lose the --verbosity=Level though.
+ * TODO: maybe "findings" below is to cli_scan specific
  *)
 let o_quiet : bool Term.t =
   let info = Arg.info [ "q"; "quiet" ] ~doc:{|Only output findings.|} in
   Arg.value (Arg.flag info)
 
+(* TODO: same, maybe we should take the doc as a paramter so each
+ * cli_xxx command can give a different help
+ *)
 let o_verbose : bool Term.t =
   let info =
     Arg.info [ "v"; "verbose" ]
@@ -53,26 +61,21 @@ let o_debug : bool Term.t =
 let o_logging : Logs.level option Term.t =
   let combine debug quiet verbose =
     match (verbose, debug, quiet) with
-    | false, false, false -> Some Logs.Warning
-    | true, false, false -> Some Logs.Info
-    | false, true, false -> Some Logs.Debug
-    | false, false, true -> None
-    | _else_ ->
+    | false, false, false -> (* default *) Some Logs.Warning
+    | true, false, false -> (* --verbose *) Some Logs.Info
+    | false, true, false -> (* --debug *) Some Logs.Debug
+    | false, false, true -> (* --quiet *) None
+    | _ ->
         (* TOPORT: list the possibilities *)
         Error.abort "mutually exclusive options --quiet/--verbose/--debug"
   in
   Term.(const combine $ o_debug $ o_quiet $ o_verbose)
 
-(* ugly: also partially done in CLI.ml *)
 let setup_logging ~force_color ~level =
-  (* For osemgrep we use the Logs library instead of the Logger
-   * library in pfff. We had a few issues with Logger (which is a small
-   * wrapper around the easy_logging library), and we don't really want
-   * the logging in semgrep-core to interfere with the proper
-   * logging/output we want in osemgrep, so this is a good opportunity
-   * to evaluate a new logging library.
-   *)
-  Logs_helpers.setup_logging ~force_color ~level;
+  Log_semgrep.setup ~force_color ~level ();
+  Logs.debug (fun m ->
+      m "Logging setup for osemgrep: force_color=%B level=%s" force_color
+        (Logs.level_to_string level));
   (* TOPORT
         # Setup file logging
         # env.user_log_file dir must exist
@@ -85,23 +88,8 @@ let setup_logging ~force_color ~level =
         file_handler.setFormatter(file_formatter)
         logger.addHandler(file_handler)
   *)
-  Logs.debug (fun m -> m "Logging setup for osemgrep");
   Logs.debug (fun m ->
-      m "Executed as: %s" (Sys.argv |> Array.to_list |> String.concat " "));
-
-  (* Easy_logging setup. We should avoid to use Logger in osemgrep/
-   * and use Logs instead, but it is still useful to get the semgrep-core
-   * logging information at runtime, hence this call.
-   *)
-  let debug =
-    match level with
-    | Some Logs.Debug -> true
-    | _else_ -> false
-  in
-  Logging_helpers.setup ~debug
-    ~log_config_file:(Fpath.v "log_config.json")
-    ~log_to_file:None;
-  ()
+      m "Executed as: %s" (Sys.argv |> Array.to_list |> String.concat " "))
 
 (*************************************************************************)
 (* Profiling options *)
@@ -113,23 +101,27 @@ let o_profile : bool Term.t =
   Arg.value (Arg.flag info)
 
 (*************************************************************************)
-(* Misc *)
+(* Term for all common CLI flags *)
 (*************************************************************************)
 
-let o_experimental : bool Term.t =
-  let info =
-    Arg.info [ "experimental" ] ~doc:{|Enable experimental features.|}
+let o_common : conf Term.t =
+  let combine logging profile maturity =
+    { logging_level = logging; profile; maturity }
   in
-  Arg.value (Arg.flag info)
+  Term.(const combine $ o_logging $ o_profile $ Maturity.o_maturity)
+
+(*************************************************************************)
+(* Misc *)
+(*************************************************************************)
 
 let help_page_bottom =
   [
     `S Manpage.s_authors;
-    `P "r2c <support@r2c.dev>";
+    `P "Semgrep Inc. <support@semgrep.com>";
     `S Manpage.s_bugs;
     `P
       "If you encounter an issue, please report it at\n\
-      \      https://github.com/returntocorp/semgrep/issues";
+      \      https://github.com/semgrep/semgrep/issues";
   ]
 
 (* Small wrapper around Cmdliner.Cmd.eval_value.
@@ -142,7 +134,7 @@ let eval_value ~argv cmd =
    *)
   match Cmd.eval_value ~catch:false ~argv cmd with
   (* alt: could define a new Exit_code for those kinds of errors *)
-  | Error (`Term | `Parse) -> Error.exit Exit_code.fatal
+  | Error (`Term | `Parse) -> Error.exit_code_exn (Exit_code.fatal ~__LOC__)
   (* this should never happen, because of the ~catch:false above *)
   | Error `Exn -> assert false
   | Ok ok -> (
@@ -150,4 +142,4 @@ let eval_value ~argv cmd =
       | `Ok config -> config
       | `Version
       | `Help ->
-          Error.exit Exit_code.ok)
+          Error.exit_code_exn (Exit_code.ok ~__LOC__))

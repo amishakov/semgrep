@@ -1,6 +1,6 @@
 (* Emma Jin, Yoann Padioleau
  *
- * Copyright (C) 2020, 2023 r2c
+ * Copyright (C) 2020, 2023 Semgrep Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
@@ -16,6 +16,7 @@ open Common
 open AST_generic
 module G = AST_generic
 module F = Format
+module Log = Log_printing.Log
 
 (*****************************************************************************)
 (* Prelude *)
@@ -64,7 +65,7 @@ type env = { lang : Lang.t; (* indentation level *) level : int }
 (* Helpers *)
 (*****************************************************************************)
 let todo any =
-  pr2 (show_any any);
+  Log.warn (fun m -> m "Pretty_print_AST TODO: %s" (show_any any));
   "*TODO*"
 
 let rec indent = function
@@ -96,7 +97,9 @@ let _lang_kind = function
   | Lang.Java
   | Lang.Apex
   | Lang.Csharp
-  | Lang.Rust ->
+  | Lang.Rust
+  | Lang.Move_on_sui
+  | Lang.Move_on_aptos ->
       CLikeSemiColon
   | _other_ -> Other
 
@@ -159,13 +162,14 @@ let rec stmt env st =
   | Label (_, _)
   | Goto (_, _, _)
   | Throw (_, _, _)
-  | Try (_, _, _, _)
+  | Try (_, _, _, _, _)
   | WithUsingResource (_, _, _)
   | Assert (_, _, _)
   | DirectiveStmt _
   | DisjStmt (_, _)
   | OtherStmtWithStmt (_, _, _)
-  | OtherStmt (_, _) ->
+  | OtherStmt (_, _)
+  | RawStmt _ ->
       todo (S st)
 
 and label_ident env lbl =
@@ -206,6 +210,7 @@ and if_stmt env (tok, e, s, sopt) =
   let bracket_body = F.sprintf "%s %s" (* (if cond) body *) in
   let format_cond, elseif_str, format_block =
     match env.lang with
+    | Lang.Circom
     | Lang.Cairo
     | Lang.Xml
     | Lang.Dart
@@ -221,7 +226,9 @@ and if_stmt env (tok, e, s, sopt) =
     | Lang.Scala
     | Lang.Solidity
     | Lang.Php
+    | Lang.Promql
     | Lang.Protobuf
+    | Lang.Ql
     | Lang.Hack
     | Lang.Yaml
     | Lang.Html
@@ -240,6 +247,8 @@ and if_stmt env (tok, e, s, sopt) =
     | Lang.Json
     | Lang.Jsonnet
     | Lang.Js
+    | Lang.Move_on_sui
+    | Lang.Move_on_aptos
     | Lang.Ts
     | Lang.Vue
     | Lang.Kotlin
@@ -281,6 +290,7 @@ and while_stmt env (tok, e, s) =
   let ruby_while = F.sprintf "%s %s\n %s\nend" in
   let while_format =
     match env.lang with
+    | Lang.Circom
     | Lang.Cairo
     | Lang.Xml
     | Lang.Dart
@@ -291,6 +301,7 @@ and while_stmt env (tok, e, s) =
     | Lang.Elixir
     | Lang.Bash
     | Lang.Php
+    | Lang.Promql
     | Lang.Protobuf
     | Lang.Dockerfile
     | Lang.Hack
@@ -300,7 +311,8 @@ and while_stmt env (tok, e, s) =
     | Lang.Solidity
     | Lang.Swift
     | Lang.Html
-    | Lang.Terraform ->
+    | Lang.Terraform
+    | Lang.Ql ->
         raise Todo
     | Lang.Python
     | Lang.Python2
@@ -315,6 +327,8 @@ and while_stmt env (tok, e, s) =
     | Lang.Json
     | Lang.Jsonnet
     | Lang.Js
+    | Lang.Move_on_sui
+    | Lang.Move_on_aptos
     | Lang.Ts
     | Lang.Vue
     | Lang.Rust
@@ -331,6 +345,7 @@ and do_while stmt env (s, e) =
   let c_do_while = F.sprintf "do %s\nwhile(%s)" in
   let do_while_format =
     match env.lang with
+    | Lang.Circom
     | Lang.Cairo
     | Lang.Xml
     | Lang.Dart
@@ -344,6 +359,7 @@ and do_while stmt env (s, e) =
     | Lang.Dockerfile
     | Lang.Hack
     | Lang.Lua
+    | Lang.Promql
     | Lang.Protobuf
     | Lang.Yaml
     | Lang.Scala
@@ -365,9 +381,12 @@ and do_while stmt env (s, e) =
     | Lang.Python
     | Lang.Python2
     | Lang.Python3
+    | Lang.Ql
     | Lang.Go
     | Lang.Json
     | Lang.Jsonnet
+    | Lang.Move_on_sui
+    | Lang.Move_on_aptos
     | Lang.Ocaml
     | Lang.Rust
     | Lang.R ->
@@ -379,6 +398,7 @@ and do_while stmt env (s, e) =
 and for_stmt env (for_tok, hdr, s) =
   let for_format =
     match env.lang with
+    | Lang.Circom
     | Lang.Cairo
     | Lang.Xml
     | Lang.Dart
@@ -389,6 +409,7 @@ and for_stmt env (for_tok, hdr, s) =
     | Lang.Elixir
     | Lang.Bash
     | Lang.Php
+    | Lang.Promql
     | Lang.Protobuf
     | Lang.Html
     | Lang.Dockerfile
@@ -406,6 +427,9 @@ and for_stmt env (for_tok, hdr, s) =
     | Lang.Csharp
     | Lang.Kotlin
     | Lang.Js
+    | Lang.Move_on_sui ->
+        failwith "Move on SUI has for loops????"
+    | Lang.Move_on_aptos
     | Lang.Ts
     | Lang.Vue
     | Lang.Rust
@@ -420,8 +444,9 @@ and for_stmt env (for_tok, hdr, s) =
     | Lang.Ruby -> F.sprintf "%s %s\ndo %s\nend"
     | Lang.Json
     | Lang.Jsonnet
-    | Lang.Ocaml ->
-        failwith "JSON/OCaml has for loops????"
+    | Lang.Ocaml
+    | Lang.Ql ->
+        failwith "JSON/OCaml/QL has for loops????"
   in
   let show_init = function
     | ForInitVar (ent, var_def) ->
@@ -451,11 +476,8 @@ and for_stmt env (for_tok, hdr, s) =
         F.sprintf "%s; %s; %s" (show_init_list init) (opt_expr cond)
           (opt_expr next)
     | ForEach (pat, tok, e) -> for_each (pat, tok, e)
-    | MultiForEach fors -> String.concat ";" (Common.map multi_for_each fors)
+    | MultiForEach fors -> String.concat ";" (List_.map multi_for_each fors)
     | ForEllipsis tok -> token ~d:"..." tok
-    | ForIn (init, exprs) ->
-        F.sprintf "%s %s %s" (show_init_list init) "in"
-          (String.concat "," (Common.map (fun e -> expr env e) exprs))
   in
   let body_str = stmt { env with level = env.level + 1 } s in
   for_format (token ~d:"for" for_tok) hdr_str body_str
@@ -477,6 +499,7 @@ and def_stmt env (entity, def_kind) =
   let var_def (ent, def) =
     let no_val, with_val =
       match env.lang with
+      | Lang.Circom
       | Lang.Cairo
       | Lang.Xml
       | Lang.Dart
@@ -487,6 +510,7 @@ and def_stmt env (entity, def_kind) =
       | Lang.Elixir
       | Lang.Bash
       | Lang.Php
+      | Lang.Promql
       | Lang.Protobuf
       | Lang.Dockerfile
       | Lang.Hack
@@ -518,9 +542,12 @@ and def_stmt env (entity, def_kind) =
       | Lang.Python
       | Lang.Python2
       | Lang.Python3
-      | Lang.Ruby ->
+      | Lang.Ruby
+      | Lang.Ql ->
           ( (fun _typ id _e -> F.sprintf "%s" id),
             fun _typ id e -> F.sprintf "%s = %s" id e )
+      | Lang.Move_on_sui
+      | Lang.Move_on_aptos
       | Lang.Rust ->
           ( (fun typ id _e -> F.sprintf "let %s: %s" id typ),
             fun typ id e -> F.sprintf "let %s: %s = %s" id typ e )
@@ -547,7 +574,7 @@ and def_stmt env (entity, def_kind) =
   | VarDef def -> var_def (entity, def)
   | _ -> todo (S (DefStmt (entity, def_kind) |> G.s))
 
-(* TODO? maybe we should check id_info.id_hidden *)
+(* TODO? maybe we should check IdFlags.is_hidden !(id_info.id_flags) *)
 and ident_or_dynamic = function
   | EN (Id (x, _idinfo)) -> ident x
   | EN _
@@ -606,7 +633,7 @@ and id_qualified env { name_last = id, _toptTODO; name_middle; name_top; _ } =
   match name_middle with
   | Some (QDots dot_ids) ->
       (* TODO: do not do fst, look also at type qualification *)
-      F.sprintf "%s.%s" (dotted_access env (Common.map fst dot_ids)) (ident id)
+      F.sprintf "%s.%s" (dotted_access env (List_.map fst dot_ids)) (ident id)
   | Some (QExpr (e, _t)) -> expr env e ^ "::"
   | None -> ident id
 
@@ -645,7 +672,7 @@ and literal _env l =
   match l with
   | Bool (true, t) -> token ~d:"true" t
   | Bool (false, t) -> token ~d:"false" t
-  | Int (_, t) -> token t
+  | Int (_, tok) -> token tok
   | Float (_, t) -> token t
   | Char (s, _) -> F.sprintf "'%s'" s
   (* TODO: once we will have string wrap bracket in AST_generic,

@@ -167,7 +167,7 @@ let rec find_ifdef_mid xs =
                              | _ -> false))
                then
                  let counts =
-                   xxs |> List.map count_open_close_stuff_ifdef_clause
+                   xxs |> List_.map count_open_close_stuff_ifdef_clause
                  in
                  let cnt1, cnt2 =
                    match counts with
@@ -521,7 +521,7 @@ let rec find_macro_lineparen xs =
                &&
                match other.t with
                | TOBrace _ -> false (* otherwise would match funcdecl *)
-               | TCBrace _ when Common.hd_exn "empty context" ctx <> InFunction
+               | TCBrace _ when List_.hd_exn "empty context" ctx <> InFunction
                  ->
                    false
                | TPtVirg _
@@ -532,10 +532,10 @@ let rec find_macro_lineparen xs =
         | _ -> false
       in
       (if condition then
-       (* just to avoid the end-of-stream pb of ocamlyacc  *)
-       let tcpar = Common2.list_last info_parens in
-       change_tok tcpar (TCPar_EOL (TH.info_of_tok tcpar.t))
-       (*macro.t <- TMacroTop (s, TH.info_of_tok macro.t);*));
+         (* just to avoid the end-of-stream pb of ocamlyacc  *)
+         let tcpar = Common2.list_last info_parens in
+         change_tok tcpar (TCPar_EOL (TH.info_of_tok tcpar.t))
+         (*macro.t <- TMacroTop (s, TH.info_of_tok macro.t);*));
       find_macro_lineparen xs
   (* macro with parameters
    * ex: DEBUG()
@@ -554,8 +554,7 @@ let rec find_macro_lineparen xs =
         &&
         match other.t with
         | TOBrace _ -> false (* otherwise would match funcdecl *)
-        | TCBrace _ when Common.hd_exn "empty context" ctx <> InFunction ->
-            false
+        | TCBrace _ when List_.hd_exn "empty context" ctx <> InFunction -> false
         | TPtVirg _
         | TCol _ ->
             false
@@ -564,7 +563,7 @@ let rec find_macro_lineparen xs =
         || col2 <= col1
            &&
            match other.t with
-           | TCBrace _ when Common.hd_exn "empty context" ctx =*= InFunction ->
+           | TCBrace _ when List_.hd_exn "empty context" ctx =*= InFunction ->
                true
            | Treturn _ -> true
            | Tif _ -> true
@@ -587,7 +586,7 @@ let rec find_macro_lineparen xs =
    *)
   | Line
       ([ PToken ({ t = TIdent (_s, _ii); col = col1; where = ctx } as macro) ]
-      as _line1)
+       as _line1)
     :: (Line (PToken ({ col = col2 } as other) :: _restline2) as line2)
     :: xs ->
       (* when s ==~ regexp_macro *)
@@ -598,14 +597,13 @@ let rec find_macro_lineparen xs =
         match other.t with
         | TPtVirg _ -> false
         | TOr _ -> false
-        | TCBrace _ when Common.hd_exn "empty context" ctx <> InFunction ->
-            false
+        | TCBrace _ when List_.hd_exn "empty context" ctx <> InFunction -> false
         | tok when TH.is_binary_operator tok -> false
         | _ -> true)
         || col2 <= col1
            &&
            match other.t with
-           | TCBrace _ when Common.hd_exn "empty context" ctx =*= InFunction ->
+           | TCBrace _ when List_.hd_exn "empty context" ctx =*= InFunction ->
                true
            | Treturn _ -> true
            | Tif _ -> true
@@ -660,7 +658,7 @@ let find_define_init_brace_paren xs =
       :: PToken { t = TIdent_Define (_s, _) }
       :: Parenthised (_xxx, _)
       :: PToken ({ t = TOBrace i1 } as tokbrace)
-      (* can be more complex expression than just an int, like (b)&... *)
+           (* can be more complex expression than just an int, like (b)&... *)
       :: Parenthised (_, _)
       :: PToken { t = TAnd _ | TOr _; _ }
       :: xs ->

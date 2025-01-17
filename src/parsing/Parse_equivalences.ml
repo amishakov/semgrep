@@ -1,6 +1,6 @@
 (* Yoann Padioleau
  *
- * Copyright (C) 2019-2021 r2c
+ * Copyright (C) 2019-2021 Semgrep Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
@@ -13,7 +13,7 @@
  * LICENSE for more details.
  *)
 open Common
-open File.Operators
+open Fpath_.Operators
 module Eq = Equivalence
 
 (*****************************************************************************)
@@ -26,17 +26,17 @@ let error s = failwith (spf "sgrep_equivalence: wrong format. %s" s)
 (*****************************************************************************)
 
 let parse file =
-  let str = File.read_file file in
+  let str = UFile.read_file file in
   let yaml_res = Yaml.of_string str in
   match yaml_res with
   | Result.Ok v -> (
       match v with
       | `O [ ("equivalences", `A xs) ] ->
           xs
-          |> Common.map (fun v ->
+          |> List_.map (fun v ->
                  match v with
                  | `O xs -> (
-                     match Common.sort_by_key_lowfirst xs with
+                     match Assoc.sort_by_key_lowfirst xs with
                      | [
                       ("id", `String id);
                       ("languages", `A langs);
@@ -44,7 +44,7 @@ let parse file =
                      ] ->
                          let languages =
                            langs
-                           |> Common.map (function
+                           |> List_.map (function
                                 | `String s -> (
                                     match Lang.of_string_opt s with
                                     | None ->
@@ -73,8 +73,14 @@ let parse file =
                                  (spf "could not parse the equivalence: %s" str)
                          in
                          let left =
-                           try Parse_pattern.parse_pattern lang left with
-                           | exn ->
+                           match Parse_pattern.parse_pattern lang left with
+                           | Ok x -> x
+                           | Error s ->
+                               error
+                                 (spf
+                                    "could not parse the left pattern: %s (%s)"
+                                    left s)
+                           | exception exn ->
                                error
                                  (spf
                                     "could not parse the left pattern: %s (exn \
@@ -82,8 +88,14 @@ let parse file =
                                     left (Common.exn_to_s exn))
                          in
                          let right =
-                           try Parse_pattern.parse_pattern lang right with
-                           | exn ->
+                           match Parse_pattern.parse_pattern lang right with
+                           | Ok x -> x
+                           | Error s ->
+                               error
+                                 (spf
+                                    "could not parse the right pattern: %s (%s)"
+                                    right s)
+                           | exception exn ->
                                error
                                  (spf
                                     "could not parse the right pattern: %s \
@@ -91,12 +103,8 @@ let parse file =
                                     right (Common.exn_to_s exn))
                          in
                          { Eq.id; left; op; right; languages }
-                     | x ->
-                         pr2_gen x;
-                         error "wrong equivalence fields")
-                 | x ->
-                     pr2_gen x;
-                     error "wrong equivalence fields")
+                     | _ -> error "wrong equivalence fields")
+                 | _ -> error "wrong equivalence fields")
       | _ -> error "missing equivalences entry")
   | Result.Error (`Msg s) ->
       failwith

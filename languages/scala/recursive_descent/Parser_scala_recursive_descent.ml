@@ -1,6 +1,6 @@
 (* Yoann Padioleau, Matthew McQuaid
  *
- * Copyright (C) 2021-2022 R2C
+ * Copyright (C) 2021-2022 Semgrep Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
@@ -13,14 +13,14 @@
  *
  *)
 open Common
+open Either_
 module T = Token_scala
 module TH = Token_helpers_scala
 module Flag = Flag_parsing
 open Token_scala
 open AST_scala
 module AST = AST_scala
-
-let logger = Logging.get_logger [ __MODULE__ ]
+module Log = Log_parser_scala.Log
 
 (*****************************************************************************)
 (* Prelude *)
@@ -158,17 +158,17 @@ type indent_status =
 (*****************************************************************************)
 (* Logging/Dumpers  *)
 (*****************************************************************************)
-let n_dash n = Common2.repeat "--" n |> Common.join ""
+let n_dash n = Common2.repeat "--" n |> String.concat ""
 
 let with_logging funcname f in_ =
   if !Flag.debug_parser then (
     let save = in_.depth in
     in_.depth <- in_.depth + 1;
     let depth = n_dash in_.depth in
-    logger#info "%s>%s: %s" depth funcname (T.show in_.token);
+    Log.debug (fun m -> m "%s>%s: %s" depth funcname (T.show in_.token));
     let res = f () in
     (* less: pass in_ ? *)
-    logger#info "%s<%s: %s" depth funcname (T.show in_.token);
+    Log.debug (fun m -> m "%s<%s: %s" depth funcname (T.show in_.token));
     in_.depth <- save;
     res)
   else f ()
@@ -179,12 +179,11 @@ let with_logging funcname f in_ =
 let error x in_ =
   let tok = in_.token in
   let info = TH.info_of_tok tok in
-  if !Flag.debug_parser then (
-    pr2 (T.show tok);
-    pr2 x);
+  if !Flag.debug_parser then
+    Log.err (fun m -> m "tok =%s, x = %s" (T.show tok) x);
   raise (Parsing_error.Syntax_error info)
 
-let warning s = if !Flag.debug_parser then pr2 ("WARNING: " ^ s)
+let warning s = if !Flag.debug_parser then Log.warn (fun m -> m "%s" s)
 
 (*****************************************************************************)
 (* Helpers  *)
@@ -224,7 +223,7 @@ let convertToParam tk e =
 
 let convertToParams tk e =
   match e with
-  | Tuple (lb, xs, rb) -> (lb, (xs |> List.map (convertToParam tk), None), rb)
+  | Tuple (lb, xs, rb) -> (lb, (xs |> List_.map (convertToParam tk), None), rb)
   | _ -> fb tk ([ convertToParam tk e ], None)
 
 let makeMatchFromExpr e =
@@ -406,8 +405,9 @@ let inSepRegion tok f in_ =
  * a NEWLINE or NEWLINES *)
 let insertNL ?(newlines = false) in_ =
   if !debug_newline then (
-    logger#info "%s: %s" "insertNL" (T.show in_.token);
-    logger#info "inserting back a newline:%s" (Dumper.dump in_.last_nl));
+    Log.debug (fun m -> m "%s: %s" "insertNL" (T.show in_.token));
+    Log.debug (fun m ->
+        m "inserting back a newline:%s" (Dumper.dump in_.last_nl)));
   match in_.last_nl with
   | None -> error "IMPOSSIBLE? no last newline to insert back" in_
   | Some x ->
@@ -431,13 +431,15 @@ let afterLineEnd in_ =
             loop xs
         | _ ->
             if !debug_newline then
-              logger#info "%s: false because %s" "afterLineEnd" (T.show x);
+              Log.debug (fun m ->
+                  m "%s: false because %s" "afterLineEnd" (T.show x));
             false)
     | [] -> false
   in
   loop in_.passed |> fun b ->
   if !debug_newline then
-    logger#info "%s: %s, result = %b" "afterLineEnd" (T.show in_.token) b;
+    Log.debug (fun m ->
+        m "%s: %s, result = %b" "afterLineEnd" (T.show in_.token) b);
   b
 
 (* ------------------------------------------------------------------------- *)
@@ -457,7 +459,8 @@ let fetchToken in_ =
     match in_.rest with
     | [] -> error "IMPOSSIBLE? fetchToken: no more tokens" in_
     | x :: xs -> (
-        if !Flag.debug_lexer then logger#info "fetchToken: %s" (T.show x);
+        if !Flag.debug_lexer then
+          Log.debug (fun m -> m "fetchToken: %s" (T.show x));
 
         in_.rest <- xs;
 
@@ -499,47 +502,47 @@ let nextToken in_ =
    *)
   (* newline: *)
   (if
-   afterLineEnd in_ && TH.inLastOfStat lastToken && TH.inFirstOfStat in_.token
-   && (match in_.sepRegions with
-      | []
-      | RBRACE _ :: _
-      (* See "note: sepFor" below. *)
-      | Kfor _ :: _
-      | DEDENT _ :: _ ->
-          true
-      | _ -> false)
-   && (* STILL?: not applyBracePatch *)
-   true
-  then
-   match () with
-   (* STILL?: | _ when pastBlankLine in_ -> insertNL ~newlines:true in_ *)
-   (* STILL?: | _ when TH.isLeadingInfixOperator *)
-   (* CHECK: scala3: "Line starts with an operator that in future" *)
-   | _ -> insertNL in_
-  else
-    (* Determine if this next token should emit an INDENT or DEDENT *)
-    (* According to the Dotty compiler, emitting a NEWLINE is exclusive with
-       emitting an INDENT or DEDENT.
-       https://github.com/lampepfl/dotty/blob/865aa639c98e0a8771366b3ebc9580cc8b61bfeb/compiler/src/dotty/tools/dotc/parsing/Scanners.scala#L596
-    *)
-    let indent_status = getIndentStatus in_ in
-    match indent_status with
-    | Some (Indent (line, width)) ->
-        (* Set our indented flag to true.
-            This bool will give us the option to enter an indentation
-            region, we might not necessarily have to.
-        *)
-        in_.is_indented <- Some (line, width)
-    | Some (Dedent (line, width)) ->
-        (* Push a DEDENT token onto our token stream.
-            This is so we can consume it in `statSeq`
+     afterLineEnd in_ && TH.inLastOfStat lastToken && TH.inFirstOfStat in_.token
+     && (match in_.sepRegions with
+        | []
+        | RBRACE _ :: _
+        (* See "note: sepFor" below. *)
+        | Kfor _ :: _
+        | DEDENT _ :: _ ->
+            true
+        | _ -> false)
+     && (* STILL?: not applyBracePatch *)
+     true
+   then
+     match () with
+     (* STILL?: | _ when pastBlankLine in_ -> insertNL ~newlines:true in_ *)
+     (* STILL?: | _ when TH.isLeadingInfixOperator *)
+     (* CHECK: scala3: "Line starts with an operator that in future" *)
+     | _ -> insertNL in_
+   else
+     (* Determine if this next token should emit an INDENT or DEDENT *)
+     (* According to the Dotty compiler, emitting a NEWLINE is exclusive with
+        emitting an INDENT or DEDENT.
+        https://github.com/lampepfl/dotty/blob/865aa639c98e0a8771366b3ebc9580cc8b61bfeb/compiler/src/dotty/tools/dotc/parsing/Scanners.scala#L596
+     *)
+     let indent_status = getIndentStatus in_ in
+     match indent_status with
+     | Some (Indent (line, width)) ->
+         (* Set our indented flag to true.
+             This bool will give us the option to enter an indentation
+             region, we might not necessarily have to.
+         *)
+         in_.is_indented <- Some (line, width)
+     | Some (Dedent (line, width)) ->
+         (* Push a DEDENT token onto our token stream.
+             This is so we can consume it in `statSeq`
 
-            This results in significantly simpler code, in the case
-            of nested DEDENTs (due to the ending of multiple indent regions)
-        *)
-        in_.rest <- in_.token :: in_.rest;
-        in_.token <- DEDENT (line, width)
-    | None -> ());
+             This results in significantly simpler code, in the case
+             of nested DEDENTs (due to the ending of multiple indent regions)
+         *)
+         in_.rest <- in_.token :: in_.rest;
+         in_.token <- DEDENT (line, width)
+     | None -> ());
   postProcessToken in_;
   ()
 
@@ -1102,7 +1105,7 @@ let paramType_ =
  *                  | null
  *  }}}
 *)
-let literal ?(isNegated = None) ?(inPattern = false) in_ : literal =
+let literal ?isNegated ?(inPattern = false) in_ : literal =
   in_
   |> with_logging
        (spf "literal(isNegated:%s, inPattern:%b)" (Dumper.dump isNegated)
@@ -1113,11 +1116,10 @@ let literal ?(isNegated = None) ?(inPattern = false) in_ : literal =
            nextToken in_;
            value_
          in
-         let negate op (x, ii) =
-           match (isNegated, x) with
-           | None, x -> (x, ii)
-           | Some iminus, Some n -> (Some (op n), Tok.combine_toks iminus [ ii ])
-           | Some iminus, None -> (None, Tok.combine_toks iminus [ ii ])
+         let negate ~f x =
+           match isNegated with
+           | None -> x
+           | Some iminus -> f iminus x
          in
          (* less: check that negate only on Int or Float *)
          match in_.token with
@@ -1131,12 +1133,28 @@ let literal ?(isNegated = None) ?(inPattern = false) in_ : literal =
          | CharacterLiteral (x, ii) ->
              (* ast: incharVal *)
              finish (Char (x, ii))
-         | IntegerLiteral (x, ii) ->
+         | IntegerLiteral pi ->
              (* ast: in.intVal(isNegated) *)
-             finish (Int (negate (fun x -> -x) (x, ii)))
+             finish
+               (Int
+                  (negate
+                     ~f:(fun iminus pi ->
+                       Parsed_int.map_tok
+                         (fun tok -> Tok.combine_toks iminus [ tok ])
+                         pi
+                       |> Parsed_int.neg)
+                     pi))
          | FloatingPointLiteral (x, ii) ->
              (* ast: in.floatVal(isNegated)*)
-             finish (Float (negate (fun x -> -.x) (x, ii)))
+             finish
+               (Float
+                  (negate
+                     ~f:(fun iminus (x, ii) ->
+                       let ii = Tok.combine_toks iminus [ ii ] in
+                       match x with
+                       | None -> (x, ii)
+                       | Some i -> (Some (-.i), ii))
+                     (x, ii)))
          | StringLiteral (x, ii) ->
              (* ast: in.strVal.intern() *)
              finish (String (x, ii))
@@ -1258,8 +1276,8 @@ and funType in_ : type_ =
       | Middle3 tys -> TyFunction2 (tys, ii, ty)
       | Right3 l_ty -> TyFunction1 (l_ty, ii, ty))
 
-and funTypeArgs in_ : ((ident * type_) list, type_ list bracket, type_) either3
-    =
+and funTypeArgs in_ :
+    ((ident * type_) list, type_ list bracket, type_) Either_.either3 =
   match in_.token with
   | LPAREN _ ->
       if is_typed_fun_param_after_lparen in_ then
@@ -1388,7 +1406,7 @@ and simpleType in_ : type_ =
          | MINUS ii when lookingAhead (fun in_ -> TH.isNumericLit in_.token) in_
            ->
              nextToken in_;
-             let x = literal ~isNegated:(Some ii) in_ in
+             let x = literal ~isNegated:ii in_ in
              (* ast: SingletonTypeTree(x) *)
              TyLiteral x
          (* See https://docs.scala-lang.org/scala3/reference/changed-features/wildcards.html *)
@@ -1802,7 +1820,7 @@ and simplePattern in_ : pattern =
                     | _ -> true)
                   in_ ->
              nextToken in_;
-             let x = literal ~isNegated:(Some ii) ~inPattern:true in_ in
+             let x = literal ~isNegated:ii ~inPattern:true in_ in
              PatLiteral x
          | x when TH.isIdentBool x || x =~= Kthis ab -> (
              let t = stableId in_ in
@@ -2088,7 +2106,7 @@ and prefixExpr ?(is_block_expr = false) in_ : expr =
         match (t, in_.token) with
         | MINUS ii, x when TH.isNumericLit x (* uname == nme.UNARY_- ... *) ->
             (* start at the -, not the number *)
-            let x = literal ~isNegated:(Some ii) in_ in
+            let x = literal ~isNegated:ii in_ in
             let x' = L x in
             simpleExprRest ~canApply:true x' in_
         | _ ->
@@ -2448,7 +2466,7 @@ and caseClauses in_ : case_clauses =
  *  TypeCaseClause  ::= `case` (InfixType | `_`) `=>` Type [semi]
  *  }}}
 *)
-and typeCaseClause icase in_ : ((tok, type_) either, type_) case_clause =
+and typeCaseClause icase in_ : ((tok, type_) Either.t, type_) case_clause =
   let l_ty =
     inSepRegion (ARROW icase)
       (fun () ->
@@ -3411,7 +3429,7 @@ let usingParamClauseInner ~caseParam owner implicitmod in_ =
       in
       if is_type then
         let tys = types in_ in
-        (Common.map (fun ty -> ParamType ty) tys, Some ii)
+        (List_.map (fun ty -> ParamType ty) tys, Some ii)
       else
         (* TODO: not right to reuse? *)
         (* no implciitmod?*)
@@ -3480,7 +3498,8 @@ let paramClauses ~ofCaseClass owner _contextBoundBuf in_ : bindings list =
  *  TypeParam             ::= Id TypeParamClauseOpt TypeBounds {`<%` Type} {`:` Type}
  *  }}}
 *)
-let rec typeParamClauseOpt _owner _contextBoundBuf in_ : type_parameters =
+let rec typeParamClauseOpt _owner _contextBoundBuf in_ : type_parameters option
+    =
   in_
   |> with_logging "typeParamClauseOpt" (fun () ->
          let typeParam in_ =
@@ -3625,7 +3644,8 @@ let constrExpr vparamss in_ : expr =
  *  FunSig ::= id [FunTypeParamClause] ParamClauses
  *  }}}
 *)
-let funDefRest fkind _attrs name in_ : function_definition * type_parameters =
+let funDefRest fkind _attrs name in_ :
+    function_definition * type_parameters option =
   in_
   |> with_logging "funDefRest" (fun () ->
          (* let newmods = ref attrs in *)
@@ -4072,7 +4092,7 @@ let blockStatSeq in_ : block_stat list =
      if (true) then
        1 else 4
 *)
-let indentedExprOrBlockStatSeqUntil ?(until = None) in_ =
+let indentedExprOrBlockStatSeqUntil ?until in_ =
   let hit_until tok =
     match until with
     | Some tok' -> tok' =~= tok
@@ -4405,8 +4425,7 @@ let templateOpt ckind vparams in_ : template_definition =
  *  ObjectDef       ::= Id ClassTemplateOpt
  *  }}}
 *)
-let objectDef ?(isCase = None) ?(isPackageObject = None) attrs in_ : definition
-    =
+let objectDef ?isCase ?isPackageObject attrs in_ : definition =
   in_
   |> with_logging "objectDef" (fun () ->
          let ikind = TH.info_of_tok in_.token in
@@ -4449,7 +4468,7 @@ let objectDef ?(isCase = None) ?(isPackageObject = None) attrs in_ : definition
  *  }}}
 *)
 let packageObjectDef ipackage in_ : definition =
-  objectDef noMods ~isPackageObject:(Some ipackage) in_
+  objectDef noMods ~isPackageObject:ipackage in_
 (* AST: gen.mkPackageObject(defn, pidPos, pkgPos) *)
 
 let packageOrPackageObject ipackage in_ : top_stat =
@@ -4486,7 +4505,7 @@ let constructorAnnotations in_ : annotation list =
 *)
 
 (* pad: I added isTrait and isCase instead of abusing mods *)
-let classDef ?(isTrait = false) ?(isCase = None) attrs in_ : definition =
+let classDef ?(isTrait = false) ?isCase attrs in_ : definition =
   in_
   |> with_logging "classDef" (fun () ->
          let ikind = TH.info_of_tok in_.token in
@@ -4811,8 +4830,8 @@ let tmplDef attrs in_ : definition =
   | Kcase ii -> (
       nextToken in_;
       match in_.token with
-      | Kclass _ -> classDef ~isCase:(Some ii) attrs in_
-      | Kobject _ -> objectDef ~isCase:(Some ii) attrs in_
+      | Kclass _ -> classDef ~isCase:ii attrs in_
+      | Kobject _ -> objectDef ~isCase:ii attrs in_
       | _ when TH.isIdentBool in_.token -> EnumCaseDef (attrs, enumCaseRest in_)
       (* pad: my error message *)
       | _ -> error "expecting class or object after a case" in_)
@@ -4834,7 +4853,7 @@ let _ =
   tmplDef_ := tmplDef;
   blockStatSeq_ := blockStatSeq;
   (indentedExprOrBlockStatSeqUntil_ :=
-     fun env ~until -> indentedExprOrBlockStatSeqUntil ~until env);
+     fun env ~until -> indentedExprOrBlockStatSeqUntil ?until env);
   packageOrPackageObject_ := packageOrPackageObject;
 
   exprTypeArgs_ := exprTypeArgs;

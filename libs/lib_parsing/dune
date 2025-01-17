@@ -4,10 +4,24 @@
  (wrapped false)
  (libraries
    fpath
-   stdcompat
+   sexplib
+   paths
+   git_wrapper
 
    commons
+   commons2
    profiling
  )
- (preprocess (pps ppx_profiling ppx_deriving.show ppx_deriving.eq ppx_hash))
+ (inline_tests)
+ (preprocess
+   (pps
+     ppx_profiling
+     ppx_deriving.show
+     ppx_deriving.ord
+     ppx_deriving.eq
+     ppx_hash
+     ppx_sexp_conv
+     ppx_inline_test
+   )
+ )
 )

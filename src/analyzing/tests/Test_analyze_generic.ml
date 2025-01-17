@@ -1,11 +1,8 @@
-open Common
 open AST_generic
-open File.Operators
 module H = AST_generic_helpers
 
 let test_typing_generic ~parse_program file =
-  let file = Fpath.v file in
-  let ast = parse_program !!file in
+  let ast = parse_program file in
   let lang = Lang.lang_of_filename_exn file in
   Naming_AST.resolve lang ast;
 
@@ -16,29 +13,28 @@ let test_typing_generic ~parse_program file =
       method! visit_function_definition _ def =
         let body = H.funcbody_to_stmt def.fbody in
         let s = AST_generic.show_any (S body) in
-        pr2 s;
-        pr2 "==>";
+        UCommon.pr2 s;
+        UCommon.pr2 "==>";
         let xs = AST_to_IL.stmt lang body in
         let s = IL.show_any (IL.Ss xs) in
-        pr2 s
+        UCommon.pr2 s
     end
   in
   v#visit_program () ast
 
 let test_constant_propagation ~parse_program file =
-  let file = Fpath.v file in
-  let ast = parse_program !!file in
+  let ast = parse_program file in
   let lang = Lang.lang_of_filename_exn file in
   Naming_AST.resolve lang ast;
   Constant_propagation.propagate_basic lang ast;
   let s = AST_generic.show_any (AST_generic.Pr ast) in
-  pr2 s
+  UCommon.pr2 s
 
 let test_il_generic ~parse_program file =
-  let file = Fpath.v file in
-  let ast = parse_program !!file in
+  let ast = parse_program file in
   let lang = Lang.lang_of_filename_exn file in
   Naming_AST.resolve lang ast;
+  Implicit_return.mark_implicit_return lang ast;
 
   let v =
     object
@@ -47,26 +43,27 @@ let test_il_generic ~parse_program file =
       method! visit_function_definition _ def =
         let body = H.funcbody_to_stmt def.fbody in
         let s = AST_generic.show_any (S body) in
-        pr2 s;
-        pr2 "==>";
+        UCommon.pr2 s;
+        UCommon.pr2 "==>";
 
         let xs = AST_to_IL.stmt lang body in
         let s = IL.show_any (IL.Ss xs) in
-        pr2 s
+        UCommon.pr2 s
     end
   in
   v#visit_program () ast
 
-let test_cfg_il ~parse_program file =
-  let file = Fpath.v file in
-  let ast = parse_program !!file in
+let test_cfg_il (caps : < Cap.exec >) ~parse_program file =
+  let ast = parse_program file in
   let lang = Lang.lang_of_filename_exn file in
   Naming_AST.resolve lang ast;
+  Implicit_return.mark_implicit_return lang ast;
   Visit_function_defs.visit
-    (fun _ fdef ->
-      let _, xs = AST_to_IL.function_definition lang fdef in
-      let cfg = CFG_build.cfg_of_stmts xs in
-      Display_IL.display_cfg cfg)
+    (fun _ent fdef ->
+      let IL.{ params = _; cfg; lambdas = _ } =
+        CFG_build.cfg_of_gfdef lang fdef
+      in
+      Display_IL.display_cfg caps cfg)
     ast
 
 module F2 = IL
@@ -80,8 +77,7 @@ module DataflowY = Dataflow_core.Make (struct
 end)
 
 let test_dfg_svalue ~parse_program file =
-  let file = Fpath.v file in
-  let ast = parse_program !!file in
+  let ast = parse_program file in
   let lang = Lang.lang_of_filename_exn file in
   Naming_AST.resolve lang ast;
   let v =
@@ -89,34 +85,34 @@ let test_dfg_svalue ~parse_program file =
       inherit [_] AST_generic.iter_no_id_info
 
       method! visit_function_definition _ def =
-        let inputs, xs = AST_to_IL.function_definition lang def in
-        let flow = CFG_build.cfg_of_stmts xs in
-        pr2 "Constness";
-        let mapping = Dataflow_svalue.fixpoint lang inputs flow in
-        Dataflow_svalue.update_svalue flow mapping;
-        DataflowY.display_mapping flow mapping
+        let fun_cfg = CFG_build.cfg_of_gfdef lang def in
+        UCommon.pr2 "Constness";
+        let mapping = Dataflow_svalue.fixpoint lang fun_cfg in
+        Dataflow_svalue.update_svalue fun_cfg.cfg mapping;
+        DataflowY.display_mapping fun_cfg.cfg mapping
           (Dataflow_var_env.env_to_str (Pretty_print_AST.svalue_to_string lang));
         let s = AST_generic.show_any (S (H.funcbody_to_stmt def.fbody)) in
-        pr2 s
+        UCommon.pr2 s
     end
   in
   v#visit_program () ast
 
-let actions ~parse_program =
+let actions (caps : < Cap.exec >) ~parse_program =
   [
     ( "-typing_generic",
       " <file>",
-      Arg_helpers.mk_action_1_arg (test_typing_generic ~parse_program) );
+      Arg_.mk_action_1_conv Fpath.v (test_typing_generic ~parse_program) );
     ( "-constant_propagation",
       " <file>",
-      Arg_helpers.mk_action_1_arg (test_constant_propagation ~parse_program) );
+      Arg_.mk_action_1_conv Fpath.v (test_constant_propagation ~parse_program)
+    );
     ( "-il_generic",
       " <file>",
-      Arg_helpers.mk_action_1_arg (test_il_generic ~parse_program) );
+      Arg_.mk_action_1_conv Fpath.v (test_il_generic ~parse_program) );
     ( "-cfg_il",
       " <file>",
-      Arg_helpers.mk_action_1_arg (test_cfg_il ~parse_program) );
+      Arg_.mk_action_1_conv Fpath.v (test_cfg_il caps ~parse_program) );
     ( "-dfg_svalue",
       " <file>",
-      Arg_helpers.mk_action_1_arg (test_dfg_svalue ~parse_program) );
+      Arg_.mk_action_1_conv Fpath.v (test_dfg_svalue ~parse_program) );
   ]
